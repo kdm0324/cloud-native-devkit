@@ -7,7 +7,8 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsup src/index.ts --format esm --dts"
+    "build": "tsup src/index.ts --format esm --dts",
+    "build:release": "tsup src/index.ts --format cjs --bundle --platform node --target node18 --out-dir dist-release --clean"
   },
   "dependencies": {
     "@inquirer/prompts": "^7.0.0",
