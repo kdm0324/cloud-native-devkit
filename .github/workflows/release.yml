@@ -40,10 +40,13 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
 
           # dist-release/index.js 가 만들어졌다는 가정
-          ENTRY="packages/cli/dist-release/index.js"
+          ENTRY="packages/cli/dist-release/index.cjs"
+          if [ ! -f "$ENTRY" ]; then
+            ENTRY="packages/cli/dist-release/index.js"
+          fi
 
           if [ ! -f "$ENTRY" ]; then
-            echo "ERROR: entry not found: $ENTRY"
+            echo "ERROR: entry not found (expected index.cjs or index.js)"
             ls -al packages/cli/dist-release || true
             exit 1
           fi
