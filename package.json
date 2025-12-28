@@ -7,10 +7,10 @@
   "scripts": {
     "local-dev": "npm --workspace packages/cli run dev",
     "dev:cli": "npm --workspace packages/cli run dev",
-    "build": "npm --workspace packages/core run build && npm --workspace packages/cli run build"
+    "build": "npm --workspace packages/core run build && npm --workspace packages/cli run build",
+    "build:release": "npm --workspace packages/core run build && npm --workspace packages/cli run build:release"
   },
   "devDependencies": {
-    "@types/node": "^25.0.3",
-    "pkg": "^5.8.1"
+    "@types/node": "^25.0.3"
   }
 }
