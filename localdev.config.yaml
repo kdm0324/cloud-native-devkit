@@ -1,0 +1,30 @@
+helm:
+  repos:
+    - name: bitnami
+      url: https://charts.bitnami.com/bitnami
+
+infra:
+  namespaceDefault: local-infra
+  releaseDefault: local-infra
+
+  components:
+    redis:
+      enabledDefault: false
+      chart: { name: redis, repoName: bitnami, version: 24.0.8 }
+      ports: [6379]
+    kafka:
+      enabledDefault: false
+      chart: { name: kafka, repoName: bitnami, version: 32.4.3 }
+      ports: [9092]
+    mysql:
+      enabledDefault: false
+      chart: { name: mysql, repoName: bitnami, version: 14.0.3 }
+      ports: [3306]
+    postgresql:
+      enabledDefault: false
+      chart: { name: postgresql, repoName: bitnami, version: 18.1.14 }
+      ports: [5432]
+    mongodb:
+      enabledDefault: false
+      chart: { name: mongodb, repoName: bitnami, version: 18.1.18 }
+      ports: [27017]

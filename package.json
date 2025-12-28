@@ -1,0 +1,15 @@
+{
+  "name": "local-dev-template",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "local-dev": "npm --workspace packages/cli run dev",
+    "dev:cli": "npm --workspace packages/cli run dev",
+    "build": "npm --workspace packages/core run build && npm --workspace packages/cli run build"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3"
+  }
+}
