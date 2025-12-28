@@ -1,13 +1,14 @@
-# local-dev-template (local-dev)
+# cloud-native-devkit (local-dev)
 
-Kubernetes 로컬 개발환경에서 Redis/Kafka/MySQL/PostgreSQL/MongoDB 같은 인프라를 **선택 설치(Helm)** 하고, **port-forward**까지 지원하는 CLI입니다.
+팀이 **클라우드 네이티브 개발환경을 로컬에서 빠르게 온보딩**할 수 있도록 돕는 CLI입니다.  
+Kubernetes 로컬 클러스터 위에 Redis/Kafka/MySQL/PostgreSQL/MongoDB 같은 인프라(Add-on)를 **선택 설치(Helm)** 하고, **port-forward**까지 지원합니다.
 
 - repo/차트 버전은 코드에 하드코딩하지 않고 `localdev.config.yaml`로 관리
 - CLI는 `kubectl + helm`만 사용 (특정 로컬 클러스터 툴에 종속되지 않음)
 - 로컬 클러스터는 사용자가 선택
   - **k3d (CLI-only, 가벼움)**: Docker 기반
   - **Rancher Desktop (GUI, 쉬움)**: k3s 기반, containerd/nerdctl 선택 가능
-- port-forward는
+- port-forward
   - 기본: **포그라운드(Ctrl+C 종료)**
   - 옵션: **백그라운드(--bg) + status/stop 지원**
 
@@ -15,16 +16,16 @@ Kubernetes 로컬 개발환경에서 Redis/Kafka/MySQL/PostgreSQL/MongoDB 같은
 
 ## Quick Start
 
-> 아래 명령은 `local-dev` 바이너리로 설치되어 있다는 가정입니다.  
+> 아래 명령은 `local-dev` 실행파일(binary)이 설치되어 있다는 가정입니다.  
 > 개발 중이면 `local-dev` 대신 `npm run dev:cli --`를 사용하세요.
 
-### 1) 진단
+### 1) 진단(필수)
 
 ```bash
 local-dev doctor
-```
+````
 
-클러스터 방식에 맞춰 추가 진단(선택):
+클러스터 방식에 맞춰 추가 힌트(선택):
 
 ```bash
 local-dev doctor --env k3d
@@ -139,9 +140,9 @@ local-dev doctor --env rancher
 
 ## 설정 파일: localdev.config.yaml
 
-- Helm repo 목록(`helm.repos`)
-- 인프라 컴포넌트별 차트/버전/기본 enabled
-- 컴포넌트별 기본 서비스 포트(`ports`)
+* Helm repo 목록(`helm.repos`)
+* 인프라 컴포넌트별 차트/버전/기본 enabled
+* 컴포넌트별 기본 서비스 포트(`ports`)
 
 즉, **repo/차트 버전 변경은 코드 수정 없이 config만 수정**하면 됩니다.
 
@@ -149,39 +150,39 @@ local-dev doctor --env rancher
 
 ## 명령어
 
-- `doctor`
+* `doctor`
 
-  - 필수 도구(helm/kubectl/config) + (선택) 클러스터 연결 상태 안내
-  - `doctor --env k3d` : k3d 환경 체크(선택)
-  - `doctor --env rancher` : Rancher Desktop 환경 체크(선택)
-  - `doctor --require-cluster` : 클러스터 연결까지 필수로 체크(없으면 실패)
+  * 필수 도구(helm/kubectl/config) + (선택) 클러스터 연결 상태 안내
+  * `doctor --env k3d` : k3d 환경 힌트(선택)
+  * `doctor --env rancher` : Rancher Desktop 환경 힌트(선택)
+  * `doctor --require-cluster` : 클러스터 연결까지 필수로 체크(없으면 실패)
 
-- `init` : 인프라 선택 → 파일 생성
+* `init` : 인프라 선택 → 파일 생성
 
-- `generate` : 저장된 spec(`.infra/spec.json`) 기반으로 파일 재생성
+* `generate` : 저장된 spec(`.infra/spec.json`) 기반으로 파일 재생성
 
-- `up` : helm upgrade/install
+* `up` : helm upgrade/install
 
-- `down` : helm uninstall
+* `down` : helm uninstall
 
-- `info` : 선택된 인프라/서비스/다음 명령 안내
+* `info` : 선택된 인프라/서비스/다음 명령 안내
 
-- `forward` : enabled 인프라 서비스 port-forward
+* `forward` : enabled 인프라 서비스 port-forward
 
-  - `forward` : 포그라운드 실행(Ctrl+C 종료)
-  - `forward --bg` : 백그라운드 실행 + PID 저장
-  - `forward status` : 백그라운드 상태 출력
-  - `forward stop` : 백그라운드 종료
+  * `forward` : 포그라운드 실행(Ctrl+C 종료)
+  * `forward --bg` : 백그라운드 실행 + PID 저장
+  * `forward status` : 백그라운드 상태 출력
+  * `forward stop` : 백그라운드 종료
 
 ---
 
 ## 생성되는 파일
 
-- `.infra/spec.json` : init에서 선택한 설정 저장
-- `charts/infra/Chart.yaml` : 의존성(차트) 정의(설정 기반 생성)
-- `charts/infra/values.yaml` : 기본값(모두 OFF)
-- `infra-values.yaml` : 실제 설치용 values (init 결과 반영)
-- `.infra/forwards.json` : (옵션) `forward --bg` 실행 시 PID/포트포워딩 상태 저장
+* `.infra/spec.json` : init에서 선택한 설정 저장
+* `charts/infra/Chart.yaml` : 의존성(차트) 정의(설정 기반 생성)
+* `charts/infra/values.yaml` : 기본값(모두 OFF)
+* `infra-values.yaml` : 실제 설치용 values (init 결과 반영)
+* `.infra/forwards.json` : (옵션) `forward --bg` 실행 시 PID/포트포워딩 상태 저장
 
 ---
 
@@ -191,8 +192,8 @@ local-dev doctor --env rancher
 
 A. kubeconfig에 컨텍스트가 없는 상태입니다. 아래 중 하나를 선택하세요.
 
-- k3d(가벼운 CLI): `local-dev doctor --env k3d` 안내대로 Docker/Colima 준비
-- Rancher Desktop: Kubernetes Enable 후 `kubectl get nodes` 확인
+* k3d(가벼운 CLI): `local-dev doctor --env k3d` 안내대로 Docker/Colima 준비
+* Rancher Desktop: Kubernetes Enable 후 `kubectl get nodes` 확인
 
 ### Q. `up` 실행 시 `Kubernetes API 연결 실패`가 떠요
 
@@ -214,15 +215,26 @@ cat .infra/spec.json
 
 ---
 
-## 배포(사용자에게 “바이너리/EXE”로 제공)
+## 배포(실행파일/Binary 중심)
 
-Node 기반 CLI는 다음 방식으로 배포할 수 있습니다.
+이 프로젝트는 **사용자에게 Node 설치를 요구하지 않는 실행파일 배포**를 목표로 합니다.
 
-### 1) npm 패키지 배포(권장)
+### 배포 방식(권장): GitHub Releases에 OS별 실행파일 제공
 
-- 사용자는 `npm i -g` 또는 `npx`로 설치/실행
+* macOS: `local-dev-darwin-arm64`, `local-dev-darwin-x64`
+* Windows: `local-dev-win-x64.exe`
+* Linux: `local-dev-linux-x64`
 
-### 2) 단일 실행파일(.exe 포함) 패키징
+사용자는 다운로드 후 PATH에 넣고 바로 실행합니다.
 
-- `pkg` 같은 도구로 단일 바이너리로 패키징할 수 있습니다.
-- OS별 빌드는 OS별 환경에서 만드는 것이 안전합니다.
+```bash
+local-dev doctor
+```
+
+> 내부 배포(사내)라면: 공유 폴더/아티팩트 저장소에 올리고 안내 문서만 배포해도 충분합니다.
+
+### (개발자용) 빌드/패키징 힌트
+
+* 단일 실행파일 패키징 도구로 `pkg` 또는 `nexe` 등을 사용할 수 있습니다.
+* OS별 바이너리는 **각 OS 환경에서 빌드**하는 것이 안전합니다.
+* GitHub Actions로 OS 매트릭스 빌드를 구성해 Releases에 업로드하는 방식을 추천합니다.
