@@ -24,6 +24,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Install deps
         run: npm ci
@@ -34,22 +35,30 @@ jobs:
       - name: Build binaries (pkg)
         shell: bash
         run: |
+          set -euo pipefail
+
           TAG="${GITHUB_REF_NAME}"
 
           # dist-release/index.js 가 만들어졌다는 가정
           ENTRY="packages/cli/dist-release/index.js"
 
-          # OS별 산출물 이름/확장자
+          if [ ! -f "$ENTRY" ]; then
+            echo "ERROR: entry not found: $ENTRY"
+            ls -al packages/cli/dist-release || true
+            exit 1
+          fi
+
           mkdir -p artifacts
 
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            npx pkg "$ENTRY" --targets node18-win-x64 --output "artifacts/local-dev-${TAG}-win-x64.exe"
+            npx pkg "$ENTRY" --targets node18-win-x64 --output "artifacts/cloud-native-devkit-${TAG}-win-x64.exe"
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            # macOS는 arm64가 흔해서 둘 다 뽑아두는 걸 추천
-            npx pkg "$ENTRY" --targets node18-macos-x64 --output "artifacts/local-dev-${TAG}-macos-x64"
-            npx pkg "$ENTRY" --targets node18-macos-arm64 --output "artifacts/local-dev-${TAG}-macos-arm64"
+            npx pkg "$ENTRY" --targets node18-macos-x64  --output "artifacts/cloud-native-devkit-${TAG}-macos-x64"
+            npx pkg "$ENTRY" --targets node18-macos-arm64 --output "artifacts/cloud-native-devkit-${TAG}-macos-arm64"
+            chmod +x artifacts/*
           else
-            npx pkg "$ENTRY" --targets node18-linux-x64 --output "artifacts/local-dev-${TAG}-linux-x64"
+            npx pkg "$ENTRY" --targets node18-linux-x64 --output "artifacts/cloud-native-devkit-${TAG}-linux-x64"
+            chmod +x artifacts/*
           fi
 
       - name: Create GitHub Release and upload assets
