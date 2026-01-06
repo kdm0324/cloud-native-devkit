@@ -1,24 +1,23 @@
 {
-  "name": "@local-dev/cli",
+  "name": "@cloud-native-devkit/cli",
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "local-dev": "dist/index.js"
+    "cnd": "dist/index.js",
+    "cnctl": "dist/index.js"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsup src/index.ts --format esm --dts",
-    "build:release": "tsup src/index.ts --format cjs --platform node --target node18 --out-dir dist-release --clean"
+    "build:release": "tsup --config tsup.release.config.ts"
   },
   "dependencies": {
+    "@cloud-native-devkit/core": "0.1.0",
     "@inquirer/prompts": "^7.0.0",
     "commander": "^12.1.0",
-    "execa": "^9.5.0",
-    "@local-dev/core": "0.1.0"
+    "execa": "^9.5.0"
   },
   "devDependencies": {
-    "tsx": "^4.19.2",
-    "tsup": "^8.0.0",
-    "typescript": "^5.6.0"
+    "tsx": "^4.21.0"
   }
 }

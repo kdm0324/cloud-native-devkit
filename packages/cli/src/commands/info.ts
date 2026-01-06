@@ -1,5 +1,5 @@
-import { loadConfig } from "@local-dev/core";
-import type { InfraComponentKey } from "@local-dev/core";
+import { loadConfig } from "@cloud-native-devkit/core";
+import type { InfraComponentKey } from "@cloud-native-devkit/core";
 import { section, step, ok, info, warn } from "../lib/io.js";
 import { getServicesJson, requireCluster } from "../lib/kube.js";
 import { loadState, loadSpec } from "../lib/state.js";

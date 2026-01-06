@@ -1,4 +1,4 @@
-# cloud-native-devkit (local-dev)
+# cloud-native-devkit (cnd)
 
 Kubernetes 로컬 개발환경에서 Redis/Kafka/MySQL/PostgreSQL/MongoDB 같은 인프라를 **선택 설치(Helm)** 하고, **port-forward**까지 지원하는 CLI입니다.
 
@@ -24,18 +24,18 @@ Kubernetes 로컬 개발환경에서 Redis/Kafka/MySQL/PostgreSQL/MongoDB 같은
 macOS/Linux:
 
 ```bash
-./local-dev --help
-./local-dev doctor
+./cnd --help
+./cnd doctor
 ````
 
 Windows (PowerShell):
 
 ```powershell
-.\local-dev.exe --help
-.\local-dev.exe doctor
+.\cnd.exe --help
+.\cnd.exe doctor
 ```
 
-> 개발 중이면 `local-dev` 대신 `npm run dev:cli --`를 사용하세요.
+> 개발 중이면 `cnd` 대신 `npm run dev:cli --`를 사용하세요.
 
 ---
 
@@ -44,27 +44,27 @@ Windows (PowerShell):
 ### 1) 진단
 
 ```bash
-local-dev doctor
+cnd doctor
 ```
 
 클러스터 방식에 맞춰 추가 진단(선택):
 
 ```bash
-local-dev doctor --env k3d
-local-dev doctor --env rancher
+cnd doctor --env k3d
+cnd doctor --env rancher
 ```
 
 클러스터 연결까지 필수로 체크(없으면 실패):
 
 ```bash
-local-dev doctor --require-cluster
+cnd doctor --require-cluster
 ```
 
 ### 2) 생성(init) → 설치(up)
 
 ```bash
-local-dev init
-local-dev up
+cnd init
+cnd up
 ```
 
 ### 3) 로컬 접속(port-forward)
@@ -72,32 +72,32 @@ local-dev up
 기본(포그라운드, Ctrl+C 종료):
 
 ```bash
-local-dev forward
+cnd forward
 ```
 
 백그라운드 실행:
 
 ```bash
-local-dev forward --bg
+cnd forward --bg
 ```
 
 상태/종료:
 
 ```bash
-local-dev forward status
-local-dev forward stop
+cnd forward status
+cnd forward stop
 ```
 
 포트 충돌 시:
 
 ```bash
-local-dev forward --map "redis=16379,kafka=19092,postgresql=15432"
+cnd forward --map "redis=16379,kafka=19092,postgresql=15432"
 ```
 
 일부만:
 
 ```bash
-local-dev forward --bg --only "redis,postgresql"
+cnd forward --bg --only "redis,postgresql"
 ```
 
 ---
@@ -120,7 +120,7 @@ kubectl get nodes
 진단:
 
 ```bash
-local-dev doctor --env k3d
+cnd doctor --env k3d
 ```
 
 ---
@@ -139,7 +139,7 @@ kubectl get nodes
 진단:
 
 ```bash
-local-dev doctor --env rancher
+cnd doctor --env rancher
 ```
 
 ---
@@ -214,7 +214,7 @@ npm run dev:cli -- forward
 
 A. kubeconfig에 컨텍스트가 없는 상태입니다. 아래 중 하나를 선택하세요.
 
-* k3d(가벼운 CLI): `local-dev doctor --env k3d` 안내대로 Docker/Colima 준비
+* k3d(가벼운 CLI): `cnd doctor --env k3d` 안내대로 Docker/Colima 준비
 * Rancher Desktop: Kubernetes Enable 후 `kubectl get nodes` 확인
 
 ### Q. `up` 실행 시 `Kubernetes API 연결 실패`가 떠요

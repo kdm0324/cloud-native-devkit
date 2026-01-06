@@ -1,3 +1,4 @@
+import path from "node:path";
 import { Command } from "commander";
 import { resolveConfigPath } from "./lib/configPath.js";
 import { fail } from "./lib/io.js";
@@ -20,15 +21,25 @@ const initCwd = process.env.INIT_CWD;
 if (initCwd) process.chdir(initCwd);
 
 const isNpmRun = Boolean(process.env.npm_lifecycle_event);
+
+// 실행된 바이너리 이름(cnd/cnctl)을 help/힌트에 반영
+const invoked = (() => {
+  const raw = process.argv[1] ?? "cnd";
+  const base = path.basename(raw);
+  return base.endsWith(".exe") ? base.slice(0, -4) : base;
+})();
+const runtimeCmd = invoked || "cnd";
+
 const hint = (cmd: string) =>
-  isNpmRun ? `npm run dev:cli -- ${cmd}` : `local-dev ${cmd}`;
+  isNpmRun ? `npm run dev:cli -- ${cmd}` : `${runtimeCmd} ${cmd}`;
 
 const program = new Command();
 
 program
-  .name("local-dev")
-  .description("Local dev infra generator + runner")
-  .option("-c, --config <path>", "config yaml path", "localdev.config.yaml");
+  .name(runtimeCmd)
+  .description("cloud-native-devkit: Local dev infra installer + port-forward")
+  // ✅ config 파일명에서 local-dev 흔적 제거
+  .option("-c, --config <path>", "config yaml path", "cnd.config.yaml");
 
 /**
  * doctor
@@ -118,18 +129,12 @@ program
 
 /**
  * forward (single command + subcommands)
- *
- * ✅ 중요한 정리:
- * - "forward"를 program에 2번 등록하면 충돌/예상치 못한 동작이 생김
- * - 그래서 forward는 한 번만 만들고,
- *   - 기본 액션: start (foreground)
- *   - subcommand: start/status/stop
  */
 const forward = program
   .command("forward")
   .description("Port-forward enabled infra services");
 
-// 기본: local-dev forward == start
+// 기본: cnd forward == start
 forward
   .option("--bg", "run in background")
   .option("--map <map>", 'local port map. ex) "redis=16379,kafka=19092"')

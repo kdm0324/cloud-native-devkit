@@ -1,11 +1,9 @@
 {
-  "name": "local-dev-template",
+  "name": "cloud-native-devkit",
   "private": true,
-  "workspaces": [
-    "packages/*"
-  ],
+  "workspaces": ["packages/*"],
   "scripts": {
-    "local-dev": "npm --workspace packages/cli run dev",
+    "cnd": "npm --workspace packages/cli run dev",
     "dev:cli": "npm --workspace packages/cli run dev",
     "build": "npm --workspace packages/core run build && npm --workspace packages/cli run build",
     "build:release": "npm --workspace packages/core run build && npm --workspace packages/cli run build:release"

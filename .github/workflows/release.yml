@@ -39,7 +39,6 @@ jobs:
 
           TAG="${GITHUB_REF_NAME}"
 
-          # dist-release/index.js 가 만들어졌다는 가정
           ENTRY="packages/cli/dist-release/index.cjs"
           if [ ! -f "$ENTRY" ]; then
             ENTRY="packages/cli/dist-release/index.js"
@@ -54,13 +53,17 @@ jobs:
           mkdir -p artifacts
 
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            npx pkg "$ENTRY" --targets node18-win-x64 --output "artifacts/cloud-native-devkit-${TAG}-win-x64.exe"
+            npx pkg "$ENTRY" --targets node18-win-x64 --output "artifacts/cnd-${TAG}-win-x64.exe"
+            cp "artifacts/cnd-${TAG}-win-x64.exe" "artifacts/cnctl-${TAG}-win-x64.exe"
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            npx pkg "$ENTRY" --targets node18-macos-x64  --output "artifacts/cloud-native-devkit-${TAG}-macos-x64"
-            npx pkg "$ENTRY" --targets node18-macos-arm64 --output "artifacts/cloud-native-devkit-${TAG}-macos-arm64"
+            npx pkg "$ENTRY" --targets node18-macos-x64   --output "artifacts/cnd-${TAG}-macos-x64"
+            npx pkg "$ENTRY" --targets node18-macos-arm64 --output "artifacts/cnd-${TAG}-macos-arm64"
+            cp "artifacts/cnd-${TAG}-macos-x64"   "artifacts/cnctl-${TAG}-macos-x64"
+            cp "artifacts/cnd-${TAG}-macos-arm64" "artifacts/cnctl-${TAG}-macos-arm64"
             chmod +x artifacts/*
           else
-            npx pkg "$ENTRY" --targets node18-linux-x64 --output "artifacts/cloud-native-devkit-${TAG}-linux-x64"
+            npx pkg "$ENTRY" --targets node18-linux-x64 --output "artifacts/cnd-${TAG}-linux-x64"
+            cp "artifacts/cnd-${TAG}-linux-x64" "artifacts/cnctl-${TAG}-linux-x64"
             chmod +x artifacts/*
           fi
 

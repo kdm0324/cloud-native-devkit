@@ -1,6 +1,6 @@
 import { checkbox, input, password } from "@inquirer/prompts";
-import { loadConfig } from "@local-dev/core";
-import type { InfraSpec, InfraComponentKey } from "@local-dev/core";
+import { loadConfig } from "@cloud-native-devkit/core";
+import type { InfraSpec, InfraComponentKey } from "@cloud-native-devkit/core";
 import { saveState, saveSpec } from "../lib/state.js";
 import { info, ok } from "../lib/io.js";
 

@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { execa } from "execa";
-import { loadConfig } from "@local-dev/core";
+import { loadConfig } from "@cloud-native-devkit/core";
 
 type DoctorEnv = "none" | "k3d" | "rancher";
 
 type DoctorOptions = {
   env?: DoctorEnv;
-  requireCluster?: boolean; // true면 클러스터 연결까지 필수(없으면 실패)
+  requireCluster?: boolean;
 };
 
 const line = (s = "") => console.log(s);
@@ -34,10 +35,10 @@ const normalizeEnv = (env?: string): DoctorEnv => {
 
 const printCommonNext = () => {
   line("\n다음 단계(클러스터 연결 가능 환경에서):");
-  line("- init:     local-dev init");
-  line("- up:       local-dev up");
-  line("- info:     local-dev info");
-  line("- forward:  local-dev forward");
+  line("- init:     cnd init");
+  line("- up:       cnd up");
+  line("- info:     cnd info");
+  line("- forward:  cnd forward");
 };
 
 const printK3dGuide = () => {
@@ -69,7 +70,6 @@ const tryGetKubeContext = async () => {
 };
 
 const tryCheckCluster = async () => {
-  // get nodes로 연결성 판단
   const r = await execa("kubectl", ["get", "nodes"], {
     stdio: "ignore",
     reject: false,
@@ -78,7 +78,6 @@ const tryCheckCluster = async () => {
 };
 
 const checkDockerDaemon = async () => {
-  // docker cli 존재 여부
   const cli = await run("docker", ["version"]);
   const okCli = cli.exitCode === 0;
 
@@ -100,6 +99,30 @@ const checkBinary = async (name: string, cmd: string) => {
   const ok = r.exitCode === 0;
   line(`${ok ? "✅" : "❌"} ${name}`);
   return ok;
+};
+
+const printDiagram = (p: {
+  ctx: string;
+  clusterOk: boolean;
+  namespace: string;
+  enabledKeys: string[];
+}) => {
+  line("\n[Diagram]");
+  line(`Local Machine (${os.platform()} ${os.arch()})`);
+  line("  |");
+  line(`  | kubectl -> context: ${p.ctx || "(none)"}`);
+  line("  v");
+  if (!p.ctx) {
+    line("Kubernetes Cluster: (not connected)");
+    return;
+  }
+  line(`Kubernetes Cluster: ${p.clusterOk ? "OK" : "FAIL"}`);
+  line(`  └─ namespace: ${p.namespace}`);
+  if (p.enabledKeys.length > 0) {
+    line(`       └─ enabled: ${p.enabledKeys.join(", ")}`);
+  } else {
+    line("       └─ enabled: (none)  // run `cnd init` first");
+  }
 };
 
 export const cmdDoctor = async (
@@ -125,6 +148,7 @@ export const cmdDoctor = async (
   line(`${okConfigExists ? "✅" : "❌"} config 파일 존재: ${absConfigPath}`);
 
   let okConfigLoad = false;
+  let namespaceDefault = "local-infra";
   if (okConfigExists) {
     try {
       const cfg = loadConfig(absConfigPath);
@@ -132,7 +156,9 @@ export const cmdDoctor = async (
         Array.isArray(cfg.helm?.repos) && cfg.helm.repos.length > 0;
       okConfigLoad = true;
 
-      line(`${okRepoCfg ? "✅" : "❌"} localdev.config.yaml helm.repos 설정`);
+      namespaceDefault = cfg.infra?.namespaceDefault ?? namespaceDefault;
+
+      line(`${okRepoCfg ? "✅" : "❌"} config helm.repos 설정`);
       line("\n[doctor] repo URL 요약");
       for (const r of cfg.helm.repos) line(`- ${r.name}: ${r.url}`);
 
@@ -144,23 +170,44 @@ export const cmdDoctor = async (
     }
   }
 
-  // kubectl context / cluster 연결은 "안내"로 처리 (기본은 실패시키지 않음)
   line("\n[doctor] Kubernetes 연결 상태(선택)\n");
 
   const ctx = await tryGetKubeContext();
+  const clusterOk = ctx ? await tryCheckCluster() : false;
+
+  // enabled keys 추정 (spec 있으면 표시, 없으면 empty)
+  const specPath = path.resolve(".infra/spec.json");
+  let enabledKeys: string[] = [];
+  if (existsFile(specPath)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(specPath, "utf-8"));
+      const comps = raw?.components ?? {};
+      enabledKeys = Object.keys(comps).filter((k) => comps?.[k]?.enabled);
+    } catch {
+      // ignore
+    }
+  }
+
+  // 다이어그램 출력(항상)
+  printDiagram({
+    ctx,
+    clusterOk,
+    namespace: namespaceDefault,
+    enabledKeys,
+  });
+
   if (!ctx) {
     line(
-      "⚠️ current-context가 없습니다. (kubectl config get-contexts 결과가 비어있을 가능성)"
+      "\n⚠️ current-context가 없습니다. (kubectl config get-contexts 결과가 비어있을 가능성)"
     );
     line("   → up/forward는 '클러스터 연결 가능한 환경'에서만 동작합니다.");
 
-    // env 선택에 따라 더 친절하게 가이드 출력
     if (env === "k3d") printK3dGuide();
     else if (env === "rancher") printRancherGuide();
     else {
       line("\n로컬 클러스터를 만들 계획이라면:");
-      line("- k3d(가벼운 CLI):  local-dev doctor --env k3d");
-      line("- Rancher Desktop: local-dev doctor --env rancher");
+      line("- k3d(가벼운 CLI):  cnd doctor --env k3d");
+      line("- Rancher Desktop: cnd doctor --env rancher");
     }
 
     if (!okHelm || !okKubectl || !okConfigExists || !okConfigLoad) {
@@ -169,7 +216,6 @@ export const cmdDoctor = async (
       );
     }
 
-    // requireCluster가 켜져 있으면 여기서 실패
     if (options.requireCluster) {
       throw new Error(
         "doctor 실패: --require-cluster 옵션이 켜져있지만 current-context가 없습니다."
@@ -182,39 +228,29 @@ export const cmdDoctor = async (
     return;
   }
 
-  line(`✅ current-context: ${ctx}`);
-
-  const clusterOk = await tryCheckCluster();
+  line(`\n✅ current-context: ${ctx}`);
   line(`${clusterOk ? "✅" : "❌"} kubectl get nodes`);
 
-  // env별 추가 체크(선택)
   if (env === "k3d") {
     line("\n[doctor] k3d 환경 체크(선택)\n");
     await checkBinary("k3d", "k3d");
     await checkDockerDaemon();
-    if (!clusterOk) {
-      printK3dGuide();
-    }
+    if (!clusterOk) printK3dGuide();
   }
 
   if (env === "rancher") {
     line("\n[doctor] Rancher Desktop 환경 체크(선택)\n");
-    // rdctl/nerdctl은 없어도 되지만 있으면 안내에 도움
     await checkCmd("rdctl (optional)", "rdctl", ["version"]);
     await checkCmd("nerdctl (optional)", "nerdctl", ["version"]);
-    if (!clusterOk) {
-      printRancherGuide();
-    }
+    if (!clusterOk) printRancherGuide();
   }
 
-  // 필수는 반드시 만족해야 함
   if (!okHelm || !okKubectl || !okConfigExists || !okConfigLoad) {
     throw new Error(
       "doctor 실패: 위 필수 항목(helm/kubectl/config)을 해결한 뒤 다시 실행하세요."
     );
   }
 
-  // 클러스터까지 필수면 실패 처리
   if (options.requireCluster && !clusterOk) {
     throw new Error(
       "doctor 실패: --require-cluster 옵션이 켜져있지만 클러스터 연결이 실패했습니다."

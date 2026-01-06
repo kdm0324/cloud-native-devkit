@@ -1,6 +1,5 @@
-// packages/cli/src/commands/up.ts
 import path from "node:path";
-import { loadConfig } from "@local-dev/core";
+import { loadConfig } from "@cloud-native-devkit/core";
 import { section, step, ok, warn, fail, info } from "../lib/io.js";
 import { requireCluster } from "../lib/kube.js";
 import { helmRepoSync, helmDepUpdate, helmUpsert } from "../lib/helm.js";
@@ -22,13 +21,8 @@ export const cmdUp = async (configPath: string) => {
         "  kubectl config current-context",
         "  kubectl get nodes",
         "",
-        "원인(흔함):",
-        "- 로컬에 Rancher Desktop / Docker Desktop Kubernetes가 꺼져 있음",
-        "- 업무용 클라우드 PC에서 클러스터 컨텍스트 설정이 안 됨",
-        "- kubeconfig가 localhost:8080 같은 잘못된 엔드포인트를 가리킴",
-        "",
         "권장:",
-        "- 지금 머신에 클러스터가 없다면, 클러스터가 있는 환경(업무용 클라우드 PC)에서 실행하세요.",
+        "- 클러스터가 없다면, 클러스터가 있는 환경에서 실행하세요.",
       ].join("\n")
     );
   }

@@ -24,8 +24,8 @@ export const generateProject = (cfg: LocalDevConfig, spec: InfraSpec, outDir: st
 - release: ${spec.release}
 
 ## Next
-- local-dev up
-- local-dev down
+- cnd up
+- cnd down
 `
   );
 };

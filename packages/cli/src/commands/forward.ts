@@ -1,14 +1,20 @@
 import { execa } from "execa";
 import { spawn } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
 
-import { loadConfig } from "@local-dev/core";
-import type { InfraComponentKey } from "@local-dev/core";
+import { loadConfig } from "@cloud-native-devkit/core";
+import type { InfraComponentKey } from "@cloud-native-devkit/core";
 
 import { section, step, ok, warn, info, fail } from "../lib/io.js";
 import { requireCluster, getServicesJson } from "../lib/kube.js";
 import { loadState, loadSpec } from "../lib/state.js";
+import {
+  saveForwards,
+  loadForwards,
+  clearForwards,
+  isAlive,
+  cleanupIfAllDead,
+  type ForwardState as SavedForwardState,
+} from "../lib/forwardState.js";
 
 type SvcItem = {
   metadata: { name: string; labels?: Record<string, string> };
@@ -30,33 +36,7 @@ type ForwardState = {
   items: ForwardItem[];
 };
 
-const FORWARD_DIR = ".infra";
-const FORWARD_PATH = path.join(FORWARD_DIR, "forwards.json");
-
-const ensureDir = () => fs.mkdirSync(FORWARD_DIR, { recursive: true });
-
-const saveForwards = (s: ForwardState) => {
-  ensureDir();
-  fs.writeFileSync(FORWARD_PATH, JSON.stringify(s, null, 2), "utf-8");
-};
-
-const loadForwards = (): ForwardState | null => {
-  if (!fs.existsSync(FORWARD_PATH)) return null;
-  return JSON.parse(fs.readFileSync(FORWARD_PATH, "utf-8"));
-};
-
-const clearForwards = () => {
-  if (fs.existsSync(FORWARD_PATH)) fs.unlinkSync(FORWARD_PATH);
-};
-
-const isAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+const TOOL = "cnd"; // 출력용(둘 다 동작하더라도 가이드는 cnd로)
 
 const parseMapArg = (s?: string) => {
   // 예: "redis=16379,kafka=19092"
@@ -170,7 +150,11 @@ const forwardStart = async (
   if (targets.length === 0) {
     fail(
       "port-forward 대상이 없습니다.",
-      "해결:\n- init에서 인프라를 하나 이상 선택하세요.\n- 또는 --only redis,kafka 처럼 지정하세요."
+      [
+        "해결:",
+        `- ${TOOL} init에서 인프라를 하나 이상 선택하세요.`,
+        `- 또는 --only redis,kafka 처럼 지정하세요.`,
+      ].join("\n")
     );
   }
 
@@ -181,7 +165,7 @@ const forwardStart = async (
   if (services.length === 0) {
     fail(
       `namespace(${ns})에 서비스가 없습니다.`,
-      "먼저 up을 실행해 설치가 되었는지 확인하세요."
+      `먼저 ${TOOL} up을 실행해 설치가 되었는지 확인하세요.`
     );
   }
 
@@ -193,8 +177,8 @@ const forwardStart = async (
     const prev = loadForwards();
     if (prev?.items?.some((it) => isAlive(it.pid))) {
       warn("이미 백그라운드 포트포워딩이 실행 중인 것으로 보입니다.");
-      info("확인: local-dev forward status");
-      info("종료: local-dev forward stop");
+      info(`확인: ${TOOL} forward status`);
+      info(`종료: ${TOOL} forward stop`);
     }
   }
 
@@ -266,39 +250,54 @@ const forwardStart = async (
       );
     }
 
+    // forwardState.ts 타입과 호환되게 저장
     saveForwards({
       namespace: ns,
       release,
       startedAt: new Date().toISOString(),
-      items: bgItems,
+      items: bgItems.map((x) => ({
+        key: x.key,
+        pid: x.pid,
+        localPort: x.localPort,
+        remotePort: x.remotePort,
+        svc: x.svc,
+      })),
     });
 
     console.log("\n✅ 백그라운드 실행 완료");
-    console.log("   - 상태: local-dev forward status");
-    console.log("   - 종료: local-dev forward stop\n");
+    console.log(`   - 상태: ${TOOL} forward status`);
+    console.log(`   - 종료: ${TOOL} forward stop\n`);
     return;
   }
 
-  // foreground: Ctrl+C 처리
+  // foreground: 실행된 child가 없다면 바로 종료
+  if (fgChildren.length === 0) {
+    warn("실행된 port-forward가 없습니다. (서비스 매칭/포트 설정 확인)");
+    return;
+  }
+
+  let isShuttingDown = false;
+
   const shutdown = () => {
-    console.log("\n\n🛑 port-forward 종료 중...\n");
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    console.log("\n🛑 port-forward 종료 중...\n");
 
     for (const c of fgChildren) {
       try {
         c.kill("SIGINT");
-        setTimeout(() => {
-          try {
-            if (c.exitCode == null) c.kill("SIGKILL");
-          } catch {}
-        }, 1000);
       } catch {}
     }
 
-    setTimeout(() => process.exit(0), 1200);
+    // ✅ 메시지 먼저 찍고 바로 정상 종료
+    console.log("✅ port-forward 종료 완료\n");
+    process.exitCode = 0;
+    process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 
   // 포그라운드는 계속 살아있게 대기
   await new Promise<void>(() => {});
@@ -310,14 +309,20 @@ const forwardStart = async (
 const forwardStatus = async () => {
   section("forward: status");
 
+  // 상태가 있는데 전부 죽어있으면 자동 정리
+  const cleaned = cleanupIfAllDead();
+  if (cleaned) {
+    warn("저장된 포트포워딩 상태가 있었지만, 모두 종료되어 정리했습니다.");
+  }
+
   const s = loadForwards();
   if (!s) {
     warn("저장된 포트포워딩 상태가 없습니다.");
-    info("시작: local-dev forward --bg");
+    info(`시작: ${TOOL} forward --bg`);
     return;
   }
 
-  info(`namespace=${s.namespace}, release=${s.release}`);
+  info(`namespace=${s.namespace}${s.release ? `, release=${s.release}` : ""}`);
   info(`startedAt=${s.startedAt}\n`);
 
   for (const it of s.items) {
@@ -364,10 +369,6 @@ const forwardStop = async () => {
 
 /**
  * exported entry
- *
- * - cmdForward(configPath, opts) : start
- * - cmdForwardStatus()          : status
- * - cmdForwardStop()            : stop
  */
 export const cmdForward = async (
   configPath: string,
