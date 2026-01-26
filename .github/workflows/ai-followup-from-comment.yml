@@ -1,0 +1,114 @@
+name: AI Follow-up from PR Comment
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  followup:
+    # 1) PR 코멘트인지
+    # 2) 코멘트가 /ai 로 시작하는지
+    # 3) 코멘트 작성자가 본인인지
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/ai') &&
+      github.actor == 'kdm0324'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout default branch first
+        uses: actions/checkout@v4
+
+      - name: Fetch PR info
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # issue_comment 이벤트에서 PR 번호는 issue.number로 동일하게 들어옵니다.
+          PR_NUMBER="${{ github.event.issue.number }}"
+
+          # PR 상세 조회
+          gh pr view "$PR_NUMBER" --json headRefName,headRepository,baseRepository,url,title \
+            > pr.json
+
+          echo "PR_NUMBER=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "HEAD_REF=$(jq -r '.headRefName' pr.json)" >> $GITHUB_OUTPUT
+          echo "HEAD_REPO=$(jq -r '.headRepository.nameWithOwner' pr.json)" >> $GITHUB_OUTPUT
+          echo "BASE_REPO=$(jq -r '.baseRepository.nameWithOwner' pr.json)" >> $GITHUB_OUTPUT
+          echo "PR_URL=$(jq -r '.url' pr.json)" >> $GITHUB_OUTPUT
+          echo "PR_TITLE=$(jq -r '.title' pr.json)" >> $GITHUB_OUTPUT
+
+      - name: Safety gate (only ai/* branch in same repo)
+        run: |
+          if [ "${{ steps.pr.outputs.HEAD_REPO }}" != "${{ steps.pr.outputs.BASE_REPO }}" ]; then
+            echo "Blocked: PR is from a fork."
+            exit 1
+          fi
+
+          case "${{ steps.pr.outputs.HEAD_REF }}" in
+            ai/*) echo "OK: ai branch" ;;
+            *) echo "Blocked: not an ai/* branch"; exit 1 ;;
+          esac
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.HEAD_REF }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps & build core
+        run: |
+          npm i
+          npm --workspace packages/core run build
+
+      - name: Install Codex CLI
+        run: npm i -g @openai/codex
+
+      - name: Run Codex follow-up (based on comment)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          COMMENT_BODY="${{ github.event.comment.body }}"
+
+          codex exec "
+          You are working on cloud-native-devkit.
+          You must ONLY implement what the user requested in the PR comment below.
+          - Do not print secrets.
+          - Keep changes minimal.
+          - After modifications, run:
+            1) npm i
+            2) npm --workspace packages/core run build
+            3) npm run dev:cli -- doctor
+          - If any command fails, stop and explain in a PR comment (do not push).
+          
+          PR comment:
+          ${COMMENT_BODY}
+          "
+
+      - name: Commit & push (if changes exist)
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "ai-bot"
+          git config user.email "ai-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "ai: follow-up from PR comment"
+          git push
+
+      - name: Comment back to PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
+            "✅ Applied follow-up from your /ai comment and pushed commits to \`${{ steps.pr.outputs.HEAD_REF }}\`."
