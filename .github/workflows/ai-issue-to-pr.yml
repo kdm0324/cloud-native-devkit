@@ -1,4 +1,4 @@
-name: AI Issue -> PR (Codex)
+name: AI Issue -> PR (Codex w/ Gemini fallback)
 
 on:
   schedule:
@@ -10,7 +10,7 @@ on:
         required: false
         type: string
       dry_run:
-        description: "true면 PR 생성/푸시 없이 계획+검증만 수행(가능한 범위)"
+        description: "true면 PR 생성/푸시 없이 계획+검증만 수행"
         required: false
         default: "false"
         type: choice
@@ -21,7 +21,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write # gh issue comment 하려면 write 필요
+  issues: write
 
 jobs:
   issue_to_pr:
@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install deps & build core
+      - name: Install deps & build core (baseline)
         run: |
           npm i
           npm --workspace packages/core run build
@@ -65,7 +65,6 @@ jobs:
 
           ISSUE_LIST=$(gh issue list --label "ai:task" --state open --limit 1 --json number,title,body,createdAt)
           ISSUE_NUMBER=$(echo "$ISSUE_LIST" | jq -r '.[0].number // empty')
-
           if [ -z "$ISSUE_NUMBER" ]; then
             echo "No ai:task issue found. Exiting."
             echo "found=false" >> $GITHUB_OUTPUT
@@ -77,31 +76,34 @@ jobs:
           echo "issue_title=$(echo "$ISSUE_LIST" | jq -r '.[0].title')" >> $GITHUB_OUTPUT
           echo "$ISSUE_LIST" | jq -r '.[0].body // ""' > ISSUE_BODY.txt
 
-      - name: Install Codex CLI
+      - name: Create branch
         if: steps.pick.outputs.found == 'true'
-        run: npm i -g @openai/codex
-
-      - name: Create branch, implement, test, and open PR
-        if: steps.pick.outputs.found == 'true'
-        env:
-          # ✅ Codex CLI가 읽는 키 이름
-          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
-
-          # (선택) 다른 스크립트/도구 호환용으로 같이 두고 싶으면
-          OPENAI_API_KEY: ${{ secrets.CODEX_API_KEY }}
-
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
-          ISSUE_BODY="$(cat ISSUE_BODY.txt)"
-          DRY_RUN="${{ inputs.dry_run }}"
-
           SHORT=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9 -' | tr ' ' '-' | cut -c1-24)
           BRANCH="ai/${ISSUE_NUMBER}-${SHORT}"
-
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
           git checkout -b "$BRANCH"
 
+      # ----------------------------
+      # 1) Try Codex (if key exists)
+      # ----------------------------
+      - name: Install Codex CLI
+        if: steps.pick.outputs.found == 'true' && secrets.OPENAI_API_KEY != ''
+        run: npm i -g @openai/codex
+
+      - name: Agent (Codex)
+        id: codex
+        if: steps.pick.outputs.found == 'true' && secrets.OPENAI_API_KEY != ''
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
+          ISSUE_BODY="$(cat ISSUE_BODY.txt)"
+
+          set +e
           codex exec "
           You are an autonomous coding agent working on the repository cloud-native-devkit.
 
@@ -115,26 +117,94 @@ jobs:
           2) ONLY implement what is in that plan. No extra features.
           3) Keep the change minimal and safe.
           4) Do not print secrets or environment variables.
-          5) After changes, run exactly these verification commands:
+          5) Do NOT run verification commands yourself. The workflow will run:
              - npm i
              - npm --workspace packages/core run build
              - npm run dev:cli -- doctor
-          6) If verification fails: STOP. Do NOT commit or push. Instead, explain failure and likely fix in a GitHub issue comment.
-          7) If verification passes:
-             - If DRY_RUN is true: do NOT commit/push/PR. Instead comment on the issue with the plan + what would change.
-             - Else: commit, push, and open a PR.
-
-          DRY_RUN=${DRY_RUN}
           IMPLEMENT NOW.
           "
+          CODEX_STATUS=$?
+          set -e
 
-          if [ "$DRY_RUN" = "true" ]; then
-            gh issue comment "$ISSUE_NUMBER" --body "🧪 DRY_RUN=true — 작업 계획을 수립/검증했고, 커밋/PR은 생성하지 않았습니다."
-            exit 0
-          fi
+          echo "status=$CODEX_STATUS" >> $GITHUB_OUTPUT
+
+      - name: If Codex failed, comment reason (quota/billing hint)
+        if: steps.pick.outputs.found == 'true' && steps.codex.outputs.status != '' && steps.codex.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          gh issue comment "$ISSUE_NUMBER" --body "⚠️ Codex 실행이 실패했습니다(예: quota/billing). Gemini로 fallback을 시도합니다."
+
+      # ----------------------------
+      # 2) Fallback to Gemini
+      # ----------------------------
+      - name: Agent (Gemini fallback)
+        if: steps.pick.outputs.found == 'true' && (steps.codex.outcome != 'success')
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: |
+            You are an autonomous coding agent working on the repository cloud-native-devkit.
+
+            USER INPUT (natural language issue):
+            Title: ${{ steps.pick.outputs.issue_title }}
+            Body:
+            $(cat ISSUE_BODY.txt)
+
+            REQUIRED BEHAVIOR:
+            1) Internally convert the user input into a TOON plan (Task/Outcome/Ops/Notes). Do NOT ask the user.
+            2) ONLY implement what is in that plan. No extra features.
+            3) Keep the change minimal and safe.
+            4) Do not print secrets or environment variables.
+            5) Do NOT run verification commands yourself. The workflow will run:
+               - npm i
+               - npm --workspace packages/core run build
+               - npm run dev:cli -- doctor
+            IMPLEMENT NOW.
+
+      # ----------------------------
+      # 3) Verify (Runbook commands)
+      # ----------------------------
+      - name: Verify (runbook)
+        if: steps.pick.outputs.found == 'true'
+        run: |
+          npm i
+          npm --workspace packages/core run build
+          npm run dev:cli -- doctor
+
+      - name: On verification failure, comment and stop
+        if: failure() && steps.pick.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          gh issue comment "$ISSUE_NUMBER" --body "❌ 검증 커맨드에서 실패했습니다. 커밋/푸시/PR 없이 종료합니다. 로그를 확인하고 원인을 수정한 뒤 재실행해주세요."
+          exit 1
+
+      # ----------------------------
+      # 4) DRY RUN or PR
+      # ----------------------------
+      - name: Dry run comment
+        if: steps.pick.outputs.found == 'true' && inputs.dry_run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          gh issue comment "$ISSUE_NUMBER" --body "🧪 DRY_RUN=true — 변경/검증까지 완료했고, 커밋/PR은 생성하지 않았습니다."
+          exit 0
+
+      - name: Commit, push, open PR
+        if: steps.pick.outputs.found == 'true' && inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
 
           if git diff --quiet && git diff --cached --quiet; then
             echo "No changes detected. Exiting."
+            gh issue comment "$ISSUE_NUMBER" --body "ℹ️ 변경 사항이 없어 PR을 만들지 않았습니다."
             exit 0
           fi
 
@@ -148,7 +218,13 @@ jobs:
             --base main \
             --head "$BRANCH" \
             --title "AI: #${ISSUE_NUMBER} ${ISSUE_TITLE}" \
-            --body "This PR was generated from issue #${ISSUE_NUMBER}.\n\nLeave a comment starting with \`/ai\` to request follow-ups.\n\nVerification:\n- npm i\n- npm --workspace packages/core run build\n- npm run dev:cli -- doctor\n"
+            --body "This PR was generated from issue #${ISSUE_NUMBER}.
+
+            Verification:
+            - npm i
+            - npm --workspace packages/core run build
+            - npm run dev:cli -- doctor
+            "
 
           PR_URL=$(gh pr view --json url -q .url)
           gh issue comment "$ISSUE_NUMBER" --body "✅ Opened PR: $PR_URL"
