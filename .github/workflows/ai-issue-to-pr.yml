@@ -21,7 +21,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: read
+  issues: write # gh issue comment 하려면 write 필요
 
 jobs:
   issue_to_pr:
@@ -46,8 +46,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           INPUT_ISSUE="${{ inputs.issue_number }}"
+
           if [ -n "$INPUT_ISSUE" ]; then
-            # 지정 이슈 조회
             ISSUE_JSON=$(gh issue view "$INPUT_ISSUE" --json number,title,body,createdAt,state)
             ISSUE_STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
             if [ "$ISSUE_STATE" != "OPEN" ]; then
@@ -63,9 +63,9 @@ jobs:
             exit 0
           fi
 
-          # 자동 선택: 가장 오래된 ai:task 이슈 1개
           ISSUE_LIST=$(gh issue list --label "ai:task" --state open --limit 1 --json number,title,body,createdAt)
           ISSUE_NUMBER=$(echo "$ISSUE_LIST" | jq -r '.[0].number // empty')
+
           if [ -z "$ISSUE_NUMBER" ]; then
             echo "No ai:task issue found. Exiting."
             echo "found=false" >> $GITHUB_OUTPUT
@@ -84,7 +84,12 @@ jobs:
       - name: Create branch, implement, test, and open PR
         if: steps.pick.outputs.found == 'true'
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # ✅ Codex CLI가 읽는 키 이름
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+
+          # (선택) 다른 스크립트/도구 호환용으로 같이 두고 싶으면
+          OPENAI_API_KEY: ${{ secrets.CODEX_API_KEY }}
+
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
