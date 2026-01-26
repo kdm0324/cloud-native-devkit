@@ -37,6 +37,7 @@ jobs:
 
       - name: Install deps & build core (baseline)
         run: |
+          set -euo pipefail
           npm i
           npm --workspace packages/core run build
 
@@ -45,45 +46,69 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
           INPUT_ISSUE="${{ inputs.issue_number }}"
 
-          if [ -n "$INPUT_ISSUE" ]; then
-            ISSUE_JSON=$(gh issue view "$INPUT_ISSUE" --json number,title,body,createdAt,state)
+          if [ -n "${INPUT_ISSUE:-}" ]; then
+            ISSUE_JSON=$(gh issue view "$INPUT_ISSUE" --json number,title,body,createdAt,state,labels)
             ISSUE_STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
+
             if [ "$ISSUE_STATE" != "OPEN" ]; then
               echo "Issue #$INPUT_ISSUE is not open. Exiting."
-              echo "found=false" >> $GITHUB_OUTPUT
+              echo "found=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            echo "found=true" >> $GITHUB_OUTPUT
-            echo "issue_number=$(echo "$ISSUE_JSON" | jq -r '.number')" >> $GITHUB_OUTPUT
-            echo "issue_title=$(echo "$ISSUE_JSON" | jq -r '.title')" >> $GITHUB_OUTPUT
+            ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
+
+            # 이미 PR이 열려있으면 스킵
+            PR_COUNT=$(gh pr list --state open --search "linked:issue:$ISSUE_NUMBER" --json number | jq 'length')
+            if [ "$PR_COUNT" -gt 0 ]; then
+              echo "Issue #$ISSUE_NUMBER already has an open PR. Exiting."
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "issue_title=$(echo "$ISSUE_JSON" | jq -r '.title')" >> "$GITHUB_OUTPUT"
             echo "$ISSUE_JSON" | jq -r '.body // ""' > ISSUE_BODY.txt
             exit 0
           fi
 
-          ISSUE_LIST=$(gh issue list --label "ai:task" --state open --limit 1 --json number,title,body,createdAt)
+          # ai:task 중 가장 오래된 1개 선택
+          ISSUE_LIST=$(gh issue list --label "ai:task" --state open --sort created --limit 1 --json number,title,body,createdAt)
           ISSUE_NUMBER=$(echo "$ISSUE_LIST" | jq -r '.[0].number // empty')
-          if [ -z "$ISSUE_NUMBER" ]; then
+
+          if [ -z "${ISSUE_NUMBER:-}" ]; then
             echo "No ai:task issue found. Exiting."
-            echo "found=false" >> $GITHUB_OUTPUT
+            echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "found=true" >> $GITHUB_OUTPUT
-          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
-          echo "issue_title=$(echo "$ISSUE_LIST" | jq -r '.[0].title')" >> $GITHUB_OUTPUT
+          # 이미 PR이 열려있으면 스킵 (재실행/중복 방지)
+          PR_COUNT=$(gh pr list --state open --search "linked:issue:$ISSUE_NUMBER" --json number | jq 'length')
+          if [ "$PR_COUNT" -gt 0 ]; then
+            echo "Issue #$ISSUE_NUMBER already has an open PR. Exiting."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "issue_title=$(echo "$ISSUE_LIST" | jq -r '.[0].title')" >> "$GITHUB_OUTPUT"
           echo "$ISSUE_LIST" | jq -r '.[0].body // ""' > ISSUE_BODY.txt
 
       - name: Create branch
         if: steps.pick.outputs.found == 'true'
         run: |
+          set -euo pipefail
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
           SHORT=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9 -' | tr ' ' '-' | cut -c1-24)
           BRANCH="ai/${ISSUE_NUMBER}-${SHORT}"
-          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
           git checkout -b "$BRANCH"
 
       # ----------------------------
@@ -103,6 +128,7 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          set -euo pipefail
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
           ISSUE_BODY="$(cat ISSUE_BODY.txt)"
 
@@ -131,6 +157,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           gh issue comment "$ISSUE_NUMBER" --body "⚠️ Codex가 실패(키 없음/Quota/기타)하여 Gemini로 fallback 합니다."
 
@@ -168,6 +195,7 @@ jobs:
       - name: Verify (runbook)
         if: steps.pick.outputs.found == 'true'
         run: |
+          set -euo pipefail
           npm i
           npm --workspace packages/core run build
           npm run dev:cli -- doctor
@@ -177,6 +205,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           gh issue comment "$ISSUE_NUMBER" --body "❌ 검증 커맨드에서 실패했습니다. 커밋/푸시/PR 없이 종료합니다. Actions 로그를 확인하고 수정 후 재실행해주세요."
           exit 1
@@ -189,6 +218,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           gh issue comment "$ISSUE_NUMBER" --body "🧪 DRY_RUN=true — 변경/검증까지 완료했고, 커밋/PR은 생성하지 않았습니다."
           exit 0
@@ -198,6 +228,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
 
@@ -227,3 +259,16 @@ jobs:
 
           PR_URL=$(gh pr view --json url -q .url)
           gh issue comment "$ISSUE_NUMBER" --body "✅ Opened PR: $PR_URL"
+
+      # ----------------------------
+      # Housekeeping (A: 라벨만 제거)
+      # - PR 오픈 성공 후 ai:task 라벨 제거해서 다음 스케줄에서 재처리 방지
+      # ----------------------------
+      - name: Post-PR housekeeping (remove ai:task label)
+        if: steps.pick.outputs.found == 'true' && inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          gh issue edit "$ISSUE_NUMBER" --remove-label "ai:task"
