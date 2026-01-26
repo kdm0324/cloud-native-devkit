@@ -67,6 +67,11 @@ local-dev init
 local-dev up
 ```
 
+```bash
+cnd init
+cnd up
+```
+
 ### 3) 로컬 접속(port-forward)
 
 기본(포그라운드, Ctrl+C 종료):

@@ -1,0 +1,6 @@
+AI 워커 동작 테스트하려고 한다. README에 전역 설치/실행 예시를 2줄만 추가해줘. 
+기능 변경은 하지 말고 문서만.
+예시는 npm i -g <package> 후 cnd doctor랑, npx <package> doctor 2개만 넣어줘.
+검증은 RUNBOOK에 적힌 커맨드들 그대로 돌려줘.
+
+
