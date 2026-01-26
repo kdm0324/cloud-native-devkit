@@ -4,6 +4,19 @@ on:
   schedule:
     - cron: "10 12 * * *" # UTC 12:10 = KST 21:10
   workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "처리할 Issue 번호 (비우면 ai:task 중 1개 자동 선택)"
+        required: false
+        type: string
+      dry_run:
+        description: "true면 PR 생성/푸시 없이 계획+검증만 수행(가능한 범위)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: write
@@ -27,14 +40,32 @@ jobs:
           npm i
           npm --workspace packages/core run build
 
-      - name: Pick one open issue labeled ai:task
+      - name: Pick issue (manual input or oldest ai:task)
         id: pick
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 가장 오래된 ai:task 이슈 1개 선택
-          ISSUE_JSON=$(gh issue list --label "ai:task" --state open --limit 1 --json number,title,body,createdAt)
-          ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.[0].number // empty')
+          INPUT_ISSUE="${{ inputs.issue_number }}"
+          if [ -n "$INPUT_ISSUE" ]; then
+            # 지정 이슈 조회
+            ISSUE_JSON=$(gh issue view "$INPUT_ISSUE" --json number,title,body,createdAt,state)
+            ISSUE_STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
+            if [ "$ISSUE_STATE" != "OPEN" ]; then
+              echo "Issue #$INPUT_ISSUE is not open. Exiting."
+              echo "found=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "issue_number=$(echo "$ISSUE_JSON" | jq -r '.number')" >> $GITHUB_OUTPUT
+            echo "issue_title=$(echo "$ISSUE_JSON" | jq -r '.title')" >> $GITHUB_OUTPUT
+            echo "$ISSUE_JSON" | jq -r '.body // ""' > ISSUE_BODY.txt
+            exit 0
+          fi
+
+          # 자동 선택: 가장 오래된 ai:task 이슈 1개
+          ISSUE_LIST=$(gh issue list --label "ai:task" --state open --limit 1 --json number,title,body,createdAt)
+          ISSUE_NUMBER=$(echo "$ISSUE_LIST" | jq -r '.[0].number // empty')
           if [ -z "$ISSUE_NUMBER" ]; then
             echo "No ai:task issue found. Exiting."
             echo "found=false" >> $GITHUB_OUTPUT
@@ -43,9 +74,8 @@ jobs:
 
           echo "found=true" >> $GITHUB_OUTPUT
           echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
-          echo "issue_title=$(echo "$ISSUE_JSON" | jq -r '.[0].title')" >> $GITHUB_OUTPUT
-          # body는 multiline이라 파일로 저장
-          echo "$ISSUE_JSON" | jq -r '.[0].body // ""' > ISSUE_BODY.txt
+          echo "issue_title=$(echo "$ISSUE_LIST" | jq -r '.[0].title')" >> $GITHUB_OUTPUT
+          echo "$ISSUE_LIST" | jq -r '.[0].body // ""' > ISSUE_BODY.txt
 
       - name: Install Codex CLI
         if: steps.pick.outputs.found == 'true'
@@ -60,8 +90,8 @@ jobs:
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
           ISSUE_BODY="$(cat ISSUE_BODY.txt)"
+          DRY_RUN="${{ inputs.dry_run }}"
 
-          # 브랜치명: ai/<issueNumber>-<short>
           SHORT=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9 -' | tr ' ' '-' | cut -c1-24)
           BRANCH="ai/${ISSUE_NUMBER}-${SHORT}"
 
@@ -85,12 +115,19 @@ jobs:
              - npm --workspace packages/core run build
              - npm run dev:cli -- doctor
           6) If verification fails: STOP. Do NOT commit or push. Instead, explain failure and likely fix in a GitHub issue comment.
-          7) If verification passes: commit, push, and open a PR.
+          7) If verification passes:
+             - If DRY_RUN is true: do NOT commit/push/PR. Instead comment on the issue with the plan + what would change.
+             - Else: commit, push, and open a PR.
 
+          DRY_RUN=${DRY_RUN}
           IMPLEMENT NOW.
           "
 
-          # 변경이 생겼고, codex가 커밋을 안 했을 수도 있어서 안전하게 처리
+          if [ "$DRY_RUN" = "true" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "🧪 DRY_RUN=true — 작업 계획을 수립/검증했고, 커밋/PR은 생성하지 않았습니다."
+            exit 0
+          fi
+
           if git diff --quiet && git diff --cached --quiet; then
             echo "No changes detected. Exiting."
             exit 0
@@ -108,6 +145,5 @@ jobs:
             --title "AI: #${ISSUE_NUMBER} ${ISSUE_TITLE}" \
             --body "This PR was generated from issue #${ISSUE_NUMBER}.\n\nLeave a comment starting with \`/ai\` to request follow-ups.\n\nVerification:\n- npm i\n- npm --workspace packages/core run build\n- npm run dev:cli -- doctor\n"
 
-          # 이슈에 PR 링크 코멘트 남기기
           PR_URL=$(gh pr view --json url -q .url)
           gh issue comment "$ISSUE_NUMBER" --body "✅ Opened PR: $PR_URL"
