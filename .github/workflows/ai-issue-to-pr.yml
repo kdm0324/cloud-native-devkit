@@ -1,4 +1,4 @@
-name: AI Issue -> PR (Codex w/ Gemini fallback)
+name: AI Issue -> PR (Codex -> Gemini fallback)
 
 on:
   schedule:
@@ -87,15 +87,18 @@ jobs:
           git checkout -b "$BRANCH"
 
       # ----------------------------
-      # 1) Try Codex (if key exists)
+      # Try Codex (best-effort)
+      # - 키 없으면 codex가 실패 -> continue-on-error로 넘어감
+      # - quota/billing도 실패 -> continue-on-error로 넘어감
       # ----------------------------
-      - name: Install Codex CLI
-        if: steps.pick.outputs.found == 'true' && secrets.OPENAI_API_KEY != ''
+      - name: Install Codex CLI (best-effort)
+        if: steps.pick.outputs.found == 'true'
+        continue-on-error: true
         run: npm i -g @openai/codex
 
-      - name: Agent (Codex)
+      - name: Agent (Codex best-effort)
         id: codex
-        if: steps.pick.outputs.found == 'true' && secrets.OPENAI_API_KEY != ''
+        if: steps.pick.outputs.found == 'true'
         continue-on-error: true
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -103,7 +106,6 @@ jobs:
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
           ISSUE_BODY="$(cat ISSUE_BODY.txt)"
 
-          set +e
           codex exec "
           You are an autonomous coding agent working on the repository cloud-native-devkit.
 
@@ -123,24 +125,21 @@ jobs:
              - npm run dev:cli -- doctor
           IMPLEMENT NOW.
           "
-          CODEX_STATUS=$?
-          set -e
 
-          echo "status=$CODEX_STATUS" >> $GITHUB_OUTPUT
-
-      - name: If Codex failed, comment reason (quota/billing hint)
-        if: steps.pick.outputs.found == 'true' && steps.codex.outputs.status != '' && steps.codex.outputs.status != '0'
+      - name: Comment if Codex failed (fallback to Gemini)
+        if: steps.pick.outputs.found == 'true' && steps.codex.outcome != 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
-          gh issue comment "$ISSUE_NUMBER" --body "⚠️ Codex 실행이 실패했습니다(예: quota/billing). Gemini로 fallback을 시도합니다."
+          gh issue comment "$ISSUE_NUMBER" --body "⚠️ Codex가 실패(키 없음/Quota/기타)하여 Gemini로 fallback 합니다."
 
       # ----------------------------
-      # 2) Fallback to Gemini
+      # Fallback to Gemini
+      # (Codex가 성공하면 Gemini는 스킵)
       # ----------------------------
       - name: Agent (Gemini fallback)
-        if: steps.pick.outputs.found == 'true' && (steps.codex.outcome != 'success')
+        if: steps.pick.outputs.found == 'true' && steps.codex.outcome != 'success'
         uses: google-github-actions/run-gemini-cli@v0
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
@@ -164,7 +163,7 @@ jobs:
             IMPLEMENT NOW.
 
       # ----------------------------
-      # 3) Verify (Runbook commands)
+      # Verify (runbook)
       # ----------------------------
       - name: Verify (runbook)
         if: steps.pick.outputs.found == 'true'
@@ -179,11 +178,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
-          gh issue comment "$ISSUE_NUMBER" --body "❌ 검증 커맨드에서 실패했습니다. 커밋/푸시/PR 없이 종료합니다. 로그를 확인하고 원인을 수정한 뒤 재실행해주세요."
+          gh issue comment "$ISSUE_NUMBER" --body "❌ 검증 커맨드에서 실패했습니다. 커밋/푸시/PR 없이 종료합니다. Actions 로그를 확인하고 수정 후 재실행해주세요."
           exit 1
 
       # ----------------------------
-      # 4) DRY RUN or PR
+      # DRY RUN or PR
       # ----------------------------
       - name: Dry run comment
         if: steps.pick.outputs.found == 'true' && inputs.dry_run == 'true'
