@@ -1,0 +1,93 @@
+name: AI Issue -> PR (Codex)
+
+on:
+  schedule:
+    - cron: "10 12 * * *" # UTC 12:10 = KST 21:10
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+
+jobs:
+  issue_to_pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps & build core
+        run: |
+          npm i
+          npm --workspace packages/core run build
+
+      - name: Pick one open issue labeled ai:task
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 가장 오래된 ai:task 이슈 1개 선택
+          ISSUE_JSON=$(gh issue list --label "ai:task" --state open --limit 1 --json number,title,body,createdAt)
+          ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.[0].number // empty')
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "No ai:task issue found. Exiting."
+            echo "found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "found=true" >> $GITHUB_OUTPUT
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+          echo "issue_title=$(echo "$ISSUE_JSON" | jq -r '.[0].title')" >> $GITHUB_OUTPUT
+          # body는 multiline이라 파일로 저장
+          echo "$ISSUE_JSON" | jq -r '.[0].body // ""' > ISSUE_BODY.txt
+
+      - name: Install Codex CLI
+        if: steps.pick.outputs.found == 'true'
+        run: npm i -g @openai/codex
+
+      - name: Create branch, implement, test, and open PR
+        if: steps.pick.outputs.found == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
+          ISSUE_BODY="$(cat ISSUE_BODY.txt)"
+
+          # 브랜치명: ai/<issueNumber>-<short>
+          SHORT=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9 -' | tr ' ' '-' | cut -c1-24)
+          BRANCH="ai/${ISSUE_NUMBER}-${SHORT}"
+
+          git checkout -b "$BRANCH"
+
+          codex exec "
+          You are an autonomous coding agent working on the repository cloud-native-devkit.
+
+          USER INPUT (natural language issue):
+          Title: ${ISSUE_TITLE}
+          Body:
+          ${ISSUE_BODY}
+
+          REQUIRED BEHAVIOR:
+          1) Internally convert the user input into a TOON plan (Task/Outcome/Ops/Notes). Do NOT ask the user.
+          2) ONLY implement what is in that plan. No extra features.
+          3) Keep the change minimal and safe.
+          4) Do not print secrets or environment variables.
+          5) After changes, run exactly these verification commands:
+             - npm i
+             - npm --workspace packages/core run build
+             - npm run dev:cli -- doctor
+          6) If verification fails: STOP. Do NOT commit or push. Instead, explain failure and likely fix in a GitHub issue comment.
+          7) If verification passes: commit, push, and open a PR.
+
+          IMPLEMENT NOW.
+          "
+
+          # 변경이 생겼고, codex가 커밋을 안 했을 수도 있
