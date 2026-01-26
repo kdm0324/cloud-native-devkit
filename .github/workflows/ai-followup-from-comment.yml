@@ -1,4 +1,4 @@
-name: AI Follow-up from PR Comment
+name: AI PR Follow-up from Comment
 
 on:
   issue_comment:
@@ -10,9 +10,7 @@ permissions:
 
 jobs:
   followup:
-    # 1) PR 코멘트인지
-    # 2) 코멘트가 /ai 로 시작하는지
-    # 3) 코멘트 작성자가 본인인지
+    # PR 코멘트이고 /ai 로 시작하며, 작성자가 너(kdm0324)일 때만 실행
     if: >
       github.event.issue.pull_request &&
       startsWith(github.event.comment.body, '/ai') &&
@@ -20,19 +18,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout default branch first
-        uses: actions/checkout@v4
-
-      - name: Fetch PR info
+      - name: Fetch PR metadata
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # issue_comment 이벤트에서 PR 번호는 issue.number로 동일하게 들어옵니다.
           PR_NUMBER="${{ github.event.issue.number }}"
-
-          # PR 상세 조회
-          gh pr view "$PR_NUMBER" --json headRefName,headRepository,baseRepository,url,title \
+          gh pr view "$PR_NUMBER" --json headRefName,headRepository,baseRepository,url \
             > pr.json
 
           echo "PR_NUMBER=$PR_NUMBER" >> $GITHUB_OUTPUT
@@ -40,15 +32,13 @@ jobs:
           echo "HEAD_REPO=$(jq -r '.headRepository.nameWithOwner' pr.json)" >> $GITHUB_OUTPUT
           echo "BASE_REPO=$(jq -r '.baseRepository.nameWithOwner' pr.json)" >> $GITHUB_OUTPUT
           echo "PR_URL=$(jq -r '.url' pr.json)" >> $GITHUB_OUTPUT
-          echo "PR_TITLE=$(jq -r '.title' pr.json)" >> $GITHUB_OUTPUT
 
-      - name: Safety gate (only ai/* branch in same repo)
+      - name: Safety gate (same repo + ai/* branch only)
         run: |
           if [ "${{ steps.pr.outputs.HEAD_REPO }}" != "${{ steps.pr.outputs.BASE_REPO }}" ]; then
-            echo "Blocked: PR is from a fork."
+            echo "Blocked: PR from a fork."
             exit 1
           fi
-
           case "${{ steps.pr.outputs.HEAD_REF }}" in
             ai/*) echo "OK: ai branch" ;;
             *) echo "Blocked: not an ai/* branch"; exit 1 ;;
@@ -72,25 +62,31 @@ jobs:
       - name: Install Codex CLI
         run: npm i -g @openai/codex
 
-      - name: Run Codex follow-up (based on comment)
+      - name: Run Codex follow-up
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           COMMENT_BODY="${{ github.event.comment.body }}"
 
           codex exec "
-          You are working on cloud-native-devkit.
-          You must ONLY implement what the user requested in the PR comment below.
-          - Do not print secrets.
-          - Keep changes minimal.
-          - After modifications, run:
-            1) npm i
-            2) npm --workspace packages/core run build
-            3) npm run dev:cli -- doctor
-          - If any command fails, stop and explain in a PR comment (do not push).
-          
-          PR comment:
+          You are continuing work on an existing AI-generated PR in cloud-native-devkit.
+
+          PR COMMENT (natural language):
           ${COMMENT_BODY}
+
+          REQUIRED BEHAVIOR:
+          1) Internally convert the comment into a TOON plan (Task/Outcome/Ops/Notes). Do NOT ask the user.
+          2) Apply ONLY what is requested. Keep changes minimal.
+          3) Do not print secrets or env vars.
+          4) Run exactly these verification commands:
+             - npm i
+             - npm --workspace packages/core run build
+             - npm run dev:cli -- doctor
+          5) If verification fails: STOP. Do NOT push. Instead, comment on the PR with failure + next steps.
+          6) If verification passes: commit and push to the current branch.
+
+          Proceed now.
           "
 
       - name: Commit & push (if changes exist)
@@ -111,4 +107,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
-            "✅ Applied follow-up from your /ai comment and pushed commits to \`${{ steps.pr.outputs.HEAD_REF }}\`."
+            "✅ Applied your /ai feedback and pushed commits to \`${{ steps.pr.outputs.HEAD_REF }}\`."
