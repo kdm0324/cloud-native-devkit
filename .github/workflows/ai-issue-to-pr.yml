@@ -78,7 +78,7 @@ jobs:
             echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
             # 멀티라인/특수문자 안전하게 저장
             {
-              echo "issue_title<<'EOF'"
+              echo "issue_title<<EOF"
               echo "$ISSUE_TITLE"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
