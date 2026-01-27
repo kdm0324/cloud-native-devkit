@@ -177,23 +177,19 @@ jobs:
         uses: google-github-actions/run-gemini-cli@v0
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
-          prompt: |
+          args: >-
             You are an autonomous coding agent working on the repository cloud-native-devkit.
-
+      
             USER INPUT (natural language issue):
             Title: ${{ steps.pick.outputs.issue_title }}
             Body:
             $(cat ISSUE_BODY.txt)
-
+      
             REQUIRED BEHAVIOR:
-            1) Internally convert the user input into a TOON plan (Task/Outcome/Ops/Notes). Do NOT ask the user.
-            2) ONLY implement what is in that plan. No extra features.
-            3) Keep the change minimal and safe.
-            4) Do not print secrets or environment variables.
-            5) Do NOT run verification commands yourself. The workflow will run:
-               - npm i
-               - npm --workspace packages/core run build
-               - npm run dev:cli -- doctor
+            - You MUST NOT run any install/build/test commands (npm, yarn, pnpm, make, gradle, mvn, etc).
+            - You MUST NOT run any shell commands at all.
+            - Only edit files to implement the requested change with minimal diff.
+            - Do not print secrets or environment variables.
             IMPLEMENT NOW.
 
       # ----------------------------
