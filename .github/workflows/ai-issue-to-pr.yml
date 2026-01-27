@@ -23,6 +23,10 @@ permissions:
   pull-requests: write
   issues: write
 
+concurrency:
+  group: ai-issue-to-pr
+  cancel-in-progress: false
+
 jobs:
   issue_to_pr:
     runs-on: ubuntu-latest
@@ -90,8 +94,7 @@ jobs:
             exit 0
           fi
 
-          # 선택된 이슈의 전체 정보 추출 (title/body도 안정적으로)
-          ISSUE_JSON=$(echo "$ISSUE_LIST" | jq -c "sort_by(.createdAt) | .[0]")
+          ISSUE_JSON=$(echo "$ISSUE_LIST" | jq -c 'sort_by(.createdAt) | .[0]')
           ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
           echo "$ISSUE_JSON" | jq -r '.body // ""' > ISSUE_BODY.txt
 
@@ -107,21 +110,22 @@ jobs:
           echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
           echo "issue_title=$ISSUE_TITLE" >> "$GITHUB_OUTPUT"
 
-      - name: Create branch
+      - name: Create branch (unique)
         if: steps.pick.outputs.found == 'true'
         run: |
           set -euo pipefail
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
           SHORT=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9 -' | tr ' ' '-' | cut -c1-24)
-          BRANCH="ai/${ISSUE_NUMBER}-${SHORT}"
+
+          # ✅ 항상 유니크하게 만들어서 push reject(fetch first) 방지
+          BRANCH="ai/${ISSUE_NUMBER}-${SHORT}-${{ github.run_id }}"
+
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
           git checkout -b "$BRANCH"
 
       # ----------------------------
       # Try Codex (best-effort)
-      # - 키 없으면 codex가 실패 -> continue-on-error로 넘어감
-      # - quota/billing도 실패 -> continue-on-error로 넘어감
       # ----------------------------
       - name: Install Codex CLI (best-effort)
         if: steps.pick.outputs.found == 'true'
@@ -170,7 +174,8 @@ jobs:
 
       # ----------------------------
       # Fallback to Gemini
-      # (Codex가 성공하면 Gemini는 스킵)
+      # - Gemini가 npm 같은 커맨드를 실행하지 않게 지시
+      # - 하지만 실제 검증(npm i/build/doctor)은 아래 Verify 스텝에서 VM이 수행
       # ----------------------------
       - name: Agent (Gemini fallback)
         if: steps.pick.outputs.found == 'true' && steps.codex.outcome != 'success'
@@ -179,12 +184,12 @@ jobs:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           args: >-
             You are an autonomous coding agent working on the repository cloud-native-devkit.
-      
+
             USER INPUT (natural language issue):
             Title: ${{ steps.pick.outputs.issue_title }}
             Body:
             $(cat ISSUE_BODY.txt)
-      
+
             REQUIRED BEHAVIOR:
             - You MUST NOT run any install/build/test commands (npm, yarn, pnpm, make, gradle, mvn, etc).
             - You MUST NOT run any shell commands at all.
@@ -193,7 +198,7 @@ jobs:
             IMPLEMENT NOW.
 
       # ----------------------------
-      # Verify (runbook)
+      # Verify (runbook) - runner VM에서 수행
       # ----------------------------
       - name: Verify (runbook)
         if: steps.pick.outputs.found == 'true'
