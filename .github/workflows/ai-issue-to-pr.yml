@@ -23,16 +23,13 @@ permissions:
   pull-requests: write
   issues: write
 
-concurrency:
-  group: ai-issue-to-pr
-  cancel-in-progress: false
-
 jobs:
   issue_to_pr:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -42,7 +39,7 @@ jobs:
       - name: Install deps & build core (baseline)
         run: |
           set -euo pipefail
-          npm i
+          npm ci
           npm --workspace packages/core run build
 
       - name: Pick issue (manual input or oldest ai:task)
@@ -54,19 +51,22 @@ jobs:
 
           INPUT_ISSUE="${{ inputs.issue_number }}"
 
-          if [ -n "${INPUT_ISSUE:-}" ]; then
-            ISSUE_JSON=$(gh issue view "$INPUT_ISSUE" --json number,title,body,createdAt,state,labels)
-            ISSUE_STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
+          pick_issue_by_number() {
+            local num="$1"
 
+            ISSUE_JSON=$(gh issue view "$num" --json number,title,body,createdAt,state)
+            ISSUE_STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
             if [ "$ISSUE_STATE" != "OPEN" ]; then
-              echo "Issue #$INPUT_ISSUE is not open. Exiting."
+              echo "Issue #$num is not open. Exiting."
               echo "found=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
             ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
+            ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+            echo "$ISSUE_JSON" | jq -r '.body // ""' > ISSUE_BODY.txt
 
-            # 이미 PR이 열려있으면 스킵
+            # 이미 PR이 열려있으면 스킵 (Fixes #N 로 link된 PR 기준)
             PR_COUNT=$(gh pr list --state open --search "linked:issue:$ISSUE_NUMBER" --json number | jq 'length')
             if [ "$PR_COUNT" -gt 0 ]; then
               echo "Issue #$ISSUE_NUMBER already has an open PR. Exiting."
@@ -76,13 +76,22 @@ jobs:
 
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-            echo "issue_title=$(echo "$ISSUE_JSON" | jq -r '.title')" >> "$GITHUB_OUTPUT"
-            echo "$ISSUE_JSON" | jq -r '.body // ""' > ISSUE_BODY.txt
+            # 멀티라인/특수문자 안전하게 저장
+            {
+              echo "issue_title<<'EOF'"
+              echo "$ISSUE_TITLE"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          if [ -n "${INPUT_ISSUE:-}" ]; then
+            pick_issue_by_number "$INPUT_ISSUE"
             exit 0
           fi
 
-          # ai:task open 전체를 가져와서 createdAt 기준 오름차순(=가장 오래된 것)으로 1개 선택
+          # ai:task open 전체를 가져와서 createdAt 기준 오름차순(=가장 오래된 것) 1개 선택
           ISSUE_LIST=$(gh issue list --label "ai:task" --state open --limit 50 --json number,title,body,createdAt)
+
           ISSUE_NUMBER=$(
             echo "$ISSUE_LIST" \
             | jq -r 'sort_by(.createdAt) | .[0].number // empty'
@@ -94,32 +103,25 @@ jobs:
             exit 0
           fi
 
-          ISSUE_JSON=$(echo "$ISSUE_LIST" | jq -c 'sort_by(.createdAt) | .[0]')
-          ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
-          echo "$ISSUE_JSON" | jq -r '.body // ""' > ISSUE_BODY.txt
+          # 선택된 이슈 번호로 동일 로직 재사용 (PR 열림 여부 포함)
+          pick_issue_by_number "$ISSUE_NUMBER"
 
-          # 이미 PR이 열려있으면 스킵 (재실행/중복 방지)
-          PR_COUNT=$(gh pr list --state open --search "linked:issue:$ISSUE_NUMBER" --json number | jq 'length')
-          if [ "$PR_COUNT" -gt 0 ]; then
-            echo "Issue #$ISSUE_NUMBER already has an open PR. Exiting."
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "found=true" >> "$GITHUB_OUTPUT"
-          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "issue_title=$ISSUE_TITLE" >> "$GITHUB_OUTPUT"
-
-      - name: Create branch (unique)
+      - name: Create branch (unique per run)
         if: steps.pick.outputs.found == 'true'
         run: |
           set -euo pipefail
+
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
-          SHORT=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9 -' | tr ' ' '-' | cut -c1-24)
 
-          # ✅ 항상 유니크하게 만들어서 push reject(fetch first) 방지
-          BRANCH="ai/${ISSUE_NUMBER}-${SHORT}-${{ github.run_id }}"
+          SHORT=$(echo "$ISSUE_TITLE" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -cd 'a-z0-9 -' \
+            | tr ' ' '-' \
+            | cut -c1-24)
+
+          # ✅ 실행마다 유니크 브랜치 (push 충돌 방지)
+          BRANCH="ai/${ISSUE_NUMBER}-${SHORT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
           git checkout -b "$BRANCH"
@@ -140,8 +142,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
+
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
-          ISSUE_BODY="$(cat ISSUE_BODY.txt)"
 
           codex exec "
           You are an autonomous coding agent working on the repository cloud-native-devkit.
@@ -149,7 +151,7 @@ jobs:
           USER INPUT (natural language issue):
           Title: ${ISSUE_TITLE}
           Body:
-          ${ISSUE_BODY}
+          $(cat ISSUE_BODY.txt)
 
           REQUIRED BEHAVIOR:
           1) Internally convert the user input into a TOON plan (Task/Outcome/Ops/Notes). Do NOT ask the user.
@@ -157,7 +159,7 @@ jobs:
           3) Keep the change minimal and safe.
           4) Do not print secrets or environment variables.
           5) Do NOT run verification commands yourself. The workflow will run:
-             - npm i
+             - npm ci
              - npm --workspace packages/core run build
              - npm run dev:cli -- doctor
           IMPLEMENT NOW.
@@ -174,8 +176,8 @@ jobs:
 
       # ----------------------------
       # Fallback to Gemini
-      # - Gemini가 npm 같은 커맨드를 실행하지 않게 지시
-      # - 하지만 실제 검증(npm i/build/doctor)은 아래 Verify 스텝에서 VM이 수행
+      # - Gemini 액션/CLI가 만드는 .gemini/ 부산물은 커밋에서 제외할 것
+      # - 프롬프트는 args(포지셔널)로 전달 (deprecated prompt 회피)
       # ----------------------------
       - name: Agent (Gemini fallback)
         if: steps.pick.outputs.found == 'true' && steps.codex.outcome != 'success'
@@ -198,13 +200,13 @@ jobs:
             IMPLEMENT NOW.
 
       # ----------------------------
-      # Verify (runbook) - runner VM에서 수행
+      # Verify (VM에서만 수행)
       # ----------------------------
       - name: Verify (runbook)
         if: steps.pick.outputs.found == 'true'
         run: |
           set -euo pipefail
-          npm i
+          npm ci
           npm --workspace packages/core run build
           npm run dev:cli -- doctor
 
@@ -241,6 +243,9 @@ jobs:
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
 
+          # ✅ 워크플로우 부산물 제거 (PR에 딸려들어가는 것 방지)
+          rm -rf .gemini ISSUE_BODY.txt || true
+
           if git diff --quiet && git diff --cached --quiet; then
             echo "No changes detected. Exiting."
             gh issue comment "$ISSUE_NUMBER" --body "ℹ️ 변경 사항이 없어 PR을 만들지 않았습니다."
@@ -257,13 +262,15 @@ jobs:
             --base main \
             --head "$BRANCH" \
             --title "AI: #${ISSUE_NUMBER} ${ISSUE_TITLE}" \
-            --body "This PR was generated from issue #${ISSUE_NUMBER}.
+            --body "Fixes #${ISSUE_NUMBER}
 
-            Verification:
-            - npm i
-            - npm --workspace packages/core run build
-            - npm run dev:cli -- doctor
-            "
+          This PR was generated from issue #${ISSUE_NUMBER}.
+
+          Verification:
+          - npm ci
+          - npm --workspace packages/core run build
+          - npm run dev:cli -- doctor
+          "
 
           PR_URL=$(gh pr view --json url -q .url)
           gh issue comment "$ISSUE_NUMBER" --body "✅ Opened PR: $PR_URL"
