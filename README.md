@@ -26,7 +26,18 @@ macOS/Linux:
 ```bash
 ./local-dev --help
 ./local-dev doctor
-````
+```
+
+글로벌 설치:
+```bash
+npm i -g @cloud-native-devkit/cli
+cnd doctor
+```
+
+npx로 실행:
+```bash
+npx @cloud-native-devkit/cli doctor
+```
 
 Windows (PowerShell):
 
