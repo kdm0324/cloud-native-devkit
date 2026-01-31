@@ -10,22 +10,26 @@ on:
         required: true
         type: string
       instruction:
-        description: "PR에 남길 /ai 지시사항(코멘트 본문 대신 사용)"
+        description: "에이전트에게 시킬 작업 지시(/ai 없이 본문만 입력)"
         required: true
         type: string
+      dry_run:
+        description: "true면 커밋/푸시 없이 수정+검증까지만"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
 
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 concurrency:
-  group: ai-pr-followup
-  cancel-in-progress: false
+  group: ai-pr-followup-${{ github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: true
 
 jobs:
   followup:
-    # PR 코멘트이고 /ai 로 시작하며, 작성자가 kdm0324일 때만 자동 실행
     if: >
       (
         github.event_name == 'issue_comment' &&
@@ -34,9 +38,8 @@ jobs:
         github.actor == 'kdm0324'
       )
       ||
-      (
-        github.event_name == 'workflow_dispatch'
-      )
+      (github.event_name == 'workflow_dispatch')
+
     runs-on: ubuntu-latest
 
     steps:
@@ -46,18 +49,25 @@ jobs:
           set -euo pipefail
 
           if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            echo "pr_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-            echo "instruction<<EOF" >> "$GITHUB_OUTPUT"
-            echo "${{ github.event.comment.body }}" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
-            echo "trigger=issue_comment" >> "$GITHUB_OUTPUT"
+            PR_NUMBER="${{ github.event.issue.number }}"
+            RAW="${{ github.event.comment.body }}"
+            # '/ai' 접두 제거 + 앞 공백 제거
+            INSTRUCTION="${RAW#/ai}"
+            INSTRUCTION="${INSTRUCTION#"${INSTRUCTION%%[![:space:]]*}"}"
+            DRY_RUN="false"
           else
-            echo "pr_number=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
-            echo "instruction<<EOF" >> "$GITHUB_OUTPUT"
-            echo "${{ inputs.instruction }}" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
-            echo "trigger=workflow_dispatch" >> "$GITHUB_OUTPUT"
+            PR_NUMBER="${{ inputs.pr_number }}"
+            INSTRUCTION="${{ inputs.instruction }}"
+            DRY_RUN="${{ inputs.dry_run }}"
           fi
+
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          {
+            echo "instruction<<EOF"
+            echo "$INSTRUCTION"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
 
       - name: Fetch PR metadata
         id: pr
@@ -65,26 +75,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-
           PR_NUMBER="${{ steps.ctx.outputs.pr_number }}"
-          gh pr view "$PR_NUMBER" --json headRefName,headRepository,baseRepository,url,title,body \
-            > pr.json
 
-          echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "HEAD_REF=$(jq -r '.headRefName' pr.json)" >> "$GITHUB_OUTPUT"
-          echo "HEAD_REPO=$(jq -r '.headRepository.nameWithOwner' pr.json)" >> "$GITHUB_OUTPUT"
-          echo "BASE_REPO=$(jq -r '.baseRepository.nameWithOwner' pr.json)" >> "$GITHUB_OUTPUT"
+          gh pr view "$PR_NUMBER" --json number,url,headRefName,headRepository,isCrossRepository > pr.json
+
+          echo "PR_NUMBER=$(jq -r '.number' pr.json)" >> "$GITHUB_OUTPUT"
           echo "PR_URL=$(jq -r '.url' pr.json)" >> "$GITHUB_OUTPUT"
-          echo "PR_TITLE<<EOF" >> "$GITHUB_OUTPUT"
-          jq -r '.title' pr.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "HEAD_REF=$(jq -r '.headRefName' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "IS_CROSS_REPO=$(jq -r '.isCrossRepository' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "HEAD_REPO=$(jq -r '.headRepository.nameWithOwner' pr.json)" >> "$GITHUB_OUTPUT"
 
       - name: Safety gate (same repo + ai/* branch only)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          if [ "${{ steps.pr.outputs.HEAD_REPO }}" != "${{ steps.pr.outputs.BASE_REPO }}" ]; then
-            echo "Blocked: PR from a fork."
+          if [ "${{ steps.pr.outputs.IS_CROSS_REPO }}" = "true" ]; then
+            echo "Blocked: PR from fork (isCrossRepository=true)"
+            exit 1
+          fi
+
+          if [ "${{ steps.pr.outputs.HEAD_REPO }}" != "${GITHUB_REPOSITORY}" ]; then
+            echo "Blocked: head repo mismatch (${{
+              steps.pr.outputs.HEAD_REPO
+            }} != ${GITHUB_REPOSITORY})"
             exit 1
           fi
 
@@ -93,20 +108,17 @@ jobs:
             *) echo "Blocked: not an ai/* branch"; exit 1 ;;
           esac
 
-      - name: Checkout PR branch
+      - name: Checkout repo (base) + fetch PR branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr.outputs.HEAD_REF }}
           fetch-depth: 0
 
-      - name: Prevent committing Gemini artifacts (local exclude)
+      - name: Checkout PR branch
         run: |
           set -euo pipefail
-          {
-            echo ".gemini/"
-            echo "ISSUE_BODY.txt"
-            echo "*.gemini*"
-          } >> .git/info/exclude
+          HEAD_REF="${{ steps.pr.outputs.HEAD_REF }}"
+          git fetch origin "$HEAD_REF":"$HEAD_REF"
+          git checkout "$HEAD_REF"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -119,151 +131,100 @@ jobs:
           npm ci
           npm --workspace packages/core run build
 
-      - name: Install Gemini CLI
-        run: |
-          set -euo pipefail
-          npm i -g @google/gemini-cli
+      # ----------------------------
+      # Agent (Gemini)
+      # - 에이전트는 파일 수정만
+      # - npm 등 검증 커맨드는 아래 Verify 단계에서 VM이 실행
+      # ----------------------------
+      - name: Agent (Gemini)
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          args: >-
+            You are an autonomous coding agent working on the repository cloud-native-devkit.
+            You are continuing work on an existing PR branch.
 
-      - name: Agent (Gemini follow-up edits repo in VM)
-        id: gemini
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          set -euo pipefail
+            USER INSTRUCTION (from PR comment or manual dispatch):
+            ${{ steps.ctx.outputs.instruction }}
 
-          PR_NUMBER="${{ steps.pr.outputs.PR_NUMBER }}"
-          PR_TITLE="${{ steps.pr.outputs.PR_TITLE }}"
-          INSTRUCTION="${{ steps.ctx.outputs.instruction }}"
-
-          PROMPT_FILE="${RUNNER_TEMP}/PROMPT.txt"
-
-          cat > "$PROMPT_FILE" <<EOF
-          You are an autonomous coding agent working inside a GitHub Actions runner.
-          
-          Repository: cloud-native-devkit
-          You are checked out on an existing AI-generated PR branch:
-          - PR: #${PR_NUMBER}
-          - Branch: ${{ steps.pr.outputs.HEAD_REF }}
-          - Title: ${PR_TITLE}
-          
-          User instruction (from PR comment or manual dispatch):
-          ${INSTRUCTION}
-          
-          Rules (MUST follow):
-          1) Apply ONLY what the instruction requests. Keep diff minimal and safe.
-          2) Prefer editing existing files; do NOT create new config/command files (especially under .gemini/).
-          3) Do NOT print secrets or environment variables.
-          4) Do NOT run install/build/test commands yourself (npm/yarn/pnpm/make/gradle/mvn etc). The workflow will run verification after you finish.
-          5) If the instruction asks for docs-only, change docs only.
-          
-          Now modify the repository files accordingly.
-          EOF
-
-          attempts=0
-          max_attempts=3
-          while true; do
-            attempts=$((attempts+1))
-            echo "Gemini attempt ${attempts}/${max_attempts}"
-
-            set +e
-            gemini --yolo "$(cat "$PROMPT_FILE")" 2> "${RUNNER_TEMP}/gemini_stderr.txt"
-            rc=$?
-            set -e
-
-            if [ $rc -eq 0 ]; then
-              echo "Gemini completed."
-              break
-            fi
-
-            if [ $attempts -ge $max_attempts ]; then
-              echo "Gemini failed after retries."
-              cat "${RUNNER_TEMP}/gemini_stderr.txt" || true
-              exit 1
-            fi
-
-            sleep $((attempts * 10))
-          done
-
-          rm -rf .gemini || true
+            REQUIRED BEHAVIOR:
+            1) Internally convert the instruction into a TOON plan (Task/Outcome/Ops/Notes). Do NOT ask questions.
+            2) Apply ONLY what is requested. Keep changes minimal and safe.
+            3) Do NOT run any install/build/test commands (npm/yarn/pnpm/make/gradle/mvn/etc).
+            4) Do NOT run any shell commands at all.
+            5) Do not print secrets or environment variables.
+            IMPLEMENT NOW by editing repository files only.
 
       - name: Verify (runbook)
-        id: verify
         run: |
           set -euo pipefail
           npm ci
           npm --workspace packages/core run build
           npm run dev:cli -- doctor
 
-      - name: Commit & push (if changes exist)
-        id: push
-        run: |
-          set -euo pipefail
-
-          rm -rf .gemini || true
-
-          if git diff --quiet && git diff --cached --quiet; then
-            echo "No changes to commit."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git config user.name "ai-bot"
-          git config user.email "ai-bot@users.noreply.github.com"
-
-          git add -A -- ':!.gemini' ':!ISSUE_BODY.txt'
-
-          if git diff --cached --quiet; then
-            echo "No staged changes."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git commit -m "ai: follow-up from PR comment"
-          git push
-
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Comment back to PR (success)
-        if: steps.push.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
-            "✅ Applied your /ai feedback and pushed commits to \`${{ steps.pr.outputs.HEAD_REF }}\`."
-
-      - name: Comment back to PR (no-op)
-        if: steps.push.outputs.changed != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
-            "ℹ️ No code/doc changes detected from your /ai instruction, so nothing was committed."
-
-      - name: Comment back to PR (failure)
+      - name: On verification failure, comment and stop
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
+            "❌ 검증 실패로 중단했습니다.
 
-          PR_NUMBER="${{ steps.pr.outputs.PR_NUMBER }}"
+          - 실행한 커맨드:
+            - npm ci
+            - npm --workspace packages/core run build
+            - npm run dev:cli -- doctor
 
-          if [ -f "${RUNNER_TEMP}/gemini_stderr.txt" ]; then
-            ERR="$(tail -n 30 "${RUNNER_TEMP}/gemini_stderr.txt" | sed 's/`/\\`/g')"
-          else
-            ERR="(no gemini stderr captured)"
+          Actions 로그를 확인하고, 수정 지시를 다시 `/ai ...` 로 남겨주세요."
+          exit 1
+
+      - name: Remove agent artifacts (if any)
+        run: |
+          set -euo pipefail
+          rm -rf .gemini || true
+
+      - name: Dry run - comment back and stop
+        if: steps.ctx.outputs.dry_run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
+            "🧪 DRY_RUN=true — 수정/검증까지 완료했고, 커밋/푸시는 하지 않았습니다."
+          exit 0
+
+      - name: Commit & push (if changes exist)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit."
+            gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
+              "ℹ️ 변경 사항이 감지되지 않아 커밋/푸시하지 않았습니다."
+            exit 0
           fi
 
-          gh pr comment "$PR_NUMBER" --body \
-            "❌ Follow-up failed. I did not push any commits.
-            
-            Last Gemini error (tail):
-            \`\`\`
-            $ERR
-            \`\`\`
-            
-            Next steps:
-            - Check Actions log for this run
-            - If it was quota/rate-limit, retry later or switch API key/plan"
+          git config user.name "ai-bot"
+          git config user.email "ai-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "ai: follow-up from PR comment"
+          git push
+
+      - name: Comment back to PR (success)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
+            "✅ /ai 지시사항을 반영해 커밋을 푸시했습니다.
+
+          - 브랜치: \`${{ steps.pr.outputs.HEAD_REF }}\`
+          - PR: ${{ steps.pr.outputs.PR_URL }}
+
+          검증:
+          - npm ci
+          - npm --workspace packages/core run build
+          - npm run dev:cli -- doctor"
