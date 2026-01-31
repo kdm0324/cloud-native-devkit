@@ -1,4 +1,4 @@
-name: AI Issue -> PR (Codex -> Gemini fallback)
+name: AI Issue -> PR (Gemini only)
 
 on:
   schedule:
@@ -23,6 +23,10 @@ permissions:
   pull-requests: write
   issues: write
 
+concurrency:
+  group: ai-issue-to-pr
+  cancel-in-progress: false
+
 jobs:
   issue_to_pr:
     runs-on: ubuntu-latest
@@ -30,6 +34,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -54,33 +60,42 @@ jobs:
           pick_issue_by_number() {
             local num="$1"
 
-            ISSUE_JSON=$(gh issue view "$num" --json number,title,body,createdAt,state)
-            ISSUE_STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
-            if [ "$ISSUE_STATE" != "OPEN" ]; then
+            local issue_json
+            issue_json="$(gh issue view "$num" --json number,title,body,createdAt,state)"
+
+            local state
+            state="$(echo "$issue_json" | jq -r '.state')"
+            if [ "$state" != "OPEN" ]; then
               echo "Issue #$num is not open. Exiting."
               echo "found=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
-            ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
-            echo "$ISSUE_JSON" | jq -r '.body // ""' > ISSUE_BODY.txt
+            local issue_number
+            issue_number="$(echo "$issue_json" | jq -r '.number')"
 
-            # 이미 PR이 열려있으면 스킵 (Fixes #N 로 link된 PR 기준)
-            PR_COUNT=$(gh pr list --state open --search "linked:issue:$ISSUE_NUMBER" --json number | jq 'length')
-            if [ "$PR_COUNT" -gt 0 ]; then
-              echo "Issue #$ISSUE_NUMBER already has an open PR. Exiting."
+            # 이미 PR이 열려있으면 스킵
+            local pr_count
+            pr_count="$(gh pr list --state open --search "linked:issue:$issue_number" --json number | jq 'length')"
+            if [ "$pr_count" -gt 0 ]; then
+              echo "Issue #$issue_number already has an open PR. Exiting."
               echo "found=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
+            local issue_title
+            issue_title="$(echo "$issue_json" | jq -r '.title')"
+
+            echo "$issue_json" | jq -r '.body // ""' > ISSUE_BODY.txt
+
             echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-            # 멀티라인/특수문자 안전하게 저장
+            echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
+
+            # ✅ title은 multiline/특수문자 안전하게 저장
             {
-              echo "issue_title<<EOF"
-              echo "$ISSUE_TITLE"
-              echo "EOF"
+              echo "issue_title<<__GHA_EOF__"
+              echo "$issue_title"
+              echo "__GHA_EOF__"
             } >> "$GITHUB_OUTPUT"
           }
 
@@ -89,13 +104,11 @@ jobs:
             exit 0
           fi
 
-          # ai:task open 전체를 가져와서 createdAt 기준 오름차순(=가장 오래된 것) 1개 선택
-          ISSUE_LIST=$(gh issue list --label "ai:task" --state open --limit 50 --json number,title,body,createdAt)
+          ISSUE_LIST="$(gh issue list --label "ai:task" --state open --limit 50 --json number,title,body,createdAt)"
 
-          ISSUE_NUMBER=$(
-            echo "$ISSUE_LIST" \
-            | jq -r 'sort_by(.createdAt) | .[0].number // empty'
-          )
+          ISSUE_NUMBER="$(
+            echo "$ISSUE_LIST" | jq -r 'sort_by(.createdAt) | .[0].number // empty'
+          )"
 
           if [ -z "${ISSUE_NUMBER:-}" ]; then
             echo "No ai:task issue found. Exiting."
@@ -103,7 +116,6 @@ jobs:
             exit 0
           fi
 
-          # 선택된 이슈 번호로 동일 로직 재사용 (PR 열림 여부 포함)
           pick_issue_by_number "$ISSUE_NUMBER"
 
       - name: Create branch (unique per run)
@@ -114,94 +126,80 @@ jobs:
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
 
-          SHORT=$(echo "$ISSUE_TITLE" \
+          SHORT="$(echo "$ISSUE_TITLE" \
             | tr '[:upper:]' '[:lower:]' \
             | tr -cd 'a-z0-9 -' \
             | tr ' ' '-' \
-            | cut -c1-24)
+            | cut -c1-24)"
 
-          # ✅ 실행마다 유니크 브랜치 (push 충돌 방지)
           BRANCH="ai/${ISSUE_NUMBER}-${SHORT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
           git checkout -b "$BRANCH"
 
-      # ----------------------------
-      # Try Codex (best-effort)
-      # ----------------------------
-      - name: Install Codex CLI (best-effort)
+      - name: Install Gemini CLI
         if: steps.pick.outputs.found == 'true'
-        continue-on-error: true
-        run: npm i -g @openai/codex
+        run: |
+          set -euo pipefail
+          npm i -g @google/gemini-cli
+          gemini --version
 
-      - name: Agent (Codex best-effort)
-        id: codex
+      - name: Agent (Gemini on runner - edit repo)
         if: steps.pick.outputs.found == 'true'
-        continue-on-error: true
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
 
-          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
-
-          codex exec "
-          You are an autonomous coding agent working on the repository cloud-native-devkit.
-
-          USER INPUT (natural language issue):
-          Title: ${ISSUE_TITLE}
-          Body:
-          $(cat ISSUE_BODY.txt)
-
-          REQUIRED BEHAVIOR:
-          1) Internally convert the user input into a TOON plan (Task/Outcome/Ops/Notes). Do NOT ask the user.
-          2) ONLY implement what is in that plan. No extra features.
-          3) Keep the change minimal and safe.
-          4) Do not print secrets or environment variables.
-          5) Do NOT run verification commands yourself. The workflow will run:
-             - npm ci
-             - npm --workspace packages/core run build
-             - npm run dev:cli -- doctor
-          IMPLEMENT NOW.
-          "
-
-      - name: Comment if Codex failed (fallback to Gemini)
-        if: steps.pick.outputs.found == 'true' && steps.codex.outcome != 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
-          gh issue comment "$ISSUE_NUMBER" --body "⚠️ Codex가 실패(키 없음/Quota/기타)하여 Gemini로 fallback 합니다."
+          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
+          ISSUE_BODY="$(cat ISSUE_BODY.txt)"
 
-      # ----------------------------
-      # Fallback to Gemini
-      # - Gemini 액션/CLI가 만드는 .gemini/ 부산물은 커밋에서 제외할 것
-      # - 프롬프트는 args(포지셔널)로 전달 (deprecated prompt 회피)
-      # ----------------------------
-      - name: Agent (Gemini fallback)
-        if: steps.pick.outputs.found == 'true' && steps.codex.outcome != 'success'
-        uses: google-github-actions/run-gemini-cli@v0
-        with:
-          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
-          args: >-
-            You are an autonomous coding agent working on the repository cloud-native-devkit.
+          # 프롬프트를 파일로 만들어 전달 (문자열 치환/개행 문제 회피)
+          cat > /tmp/prompt.txt <<'PROMPT'
+          You are an autonomous coding agent running INSIDE a GitHub Actions runner.
+          The repository is already checked out locally. You MUST edit local files directly.
 
-            USER INPUT (natural language issue):
-            Title: ${{ steps.pick.outputs.issue_title }}
-            Body:
-            $(cat ISSUE_BODY.txt)
+          HARD RULES:
+          - Implement ONLY what the issue asks.
+          - Keep the diff minimal and safe.
+          - Do NOT create any new files or folders (especially no .gemini/*, no scripts, no extra docs).
+          - Do NOT modify package-lock.json or any dependency files.
+          - Do NOT run any install/build/test commands (npm/yarn/pnpm/make/gradle/mvn/etc).
+          - Do NOT print secrets or environment variables.
 
-            REQUIRED BEHAVIOR:
-            - You MUST NOT run any install/build/test commands (npm, yarn, pnpm, make, gradle, mvn, etc).
-            - You MUST NOT run any shell commands at all.
-            - Only edit files to implement the requested change with minimal diff.
-            - Do not print secrets or environment variables.
-            IMPLEMENT NOW.
+          Issue:
+          - Number: __ISSUE_NUMBER__
+          - Title: __ISSUE_TITLE__
+          - Body:
+          __ISSUE_BODY__
 
-      # ----------------------------
-      # Verify (VM에서만 수행)
-      # ----------------------------
+          Now implement by editing the repository files.
+          PROMPT
+
+          # placeholder 치환
+          sed -i "s|__ISSUE_NUMBER__|${ISSUE_NUMBER}|g" /tmp/prompt.txt
+          sed -i "s|__ISSUE_TITLE__|${ISSUE_TITLE}|g" /tmp/prompt.txt
+          perl -0777 -i -pe 's/__ISSUE_BODY__/$ENV{ISSUE_BODY}/g' /tmp/prompt.txt
+
+          # Gemini 실행
+          gemini "$(cat /tmp/prompt.txt)"
+
+          echo "---- git status (after gemini) ----"
+          git status --porcelain
+
+          # ✅ .gemini 같은 부산물 생기면 즉시 실패 (원치 않는 생성물 방지)
+          if [ -d ".gemini" ]; then
+            echo "ERROR: .gemini directory was created. This is not allowed."
+            exit 1
+          fi
+
+          # ✅ package-lock.json 변경 금지
+          if git diff --name-only | grep -q '^package-lock\.json$'; then
+            echo "ERROR: package-lock.json was modified. This is not allowed."
+            exit 1
+          fi
+
       - name: Verify (runbook)
         if: steps.pick.outputs.found == 'true'
         run: |
@@ -220,9 +218,6 @@ jobs:
           gh issue comment "$ISSUE_NUMBER" --body "❌ 검증 커맨드에서 실패했습니다. 커밋/푸시/PR 없이 종료합니다. Actions 로그를 확인하고 수정 후 재실행해주세요."
           exit 1
 
-      # ----------------------------
-      # DRY RUN or PR
-      # ----------------------------
       - name: Dry run comment
         if: steps.pick.outputs.found == 'true' && inputs.dry_run == 'true'
         env:
@@ -243,8 +238,8 @@ jobs:
           ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
 
-          # ✅ 워크플로우 부산물 제거 (PR에 딸려들어가는 것 방지)
-          rm -rf .gemini ISSUE_BODY.txt || true
+          # 워크플로 파일 제거 (커밋에 섞이지 않게)
+          rm -f ISSUE_BODY.txt || true
 
           if git diff --quiet && git diff --cached --quiet; then
             echo "No changes detected. Exiting."
@@ -254,8 +249,10 @@ jobs:
 
           git config user.name "ai-bot"
           git config user.email "ai-bot@users.noreply.github.com"
+
           git add -A
           git commit -m "ai: ${ISSUE_NUMBER} ${ISSUE_TITLE}"
+
           git push --set-upstream origin "$BRANCH"
 
           gh pr create \
@@ -272,13 +269,9 @@ jobs:
           - npm run dev:cli -- doctor
           "
 
-          PR_URL=$(gh pr view --json url -q .url)
+          PR_URL="$(gh pr view --json url -q .url)"
           gh issue comment "$ISSUE_NUMBER" --body "✅ Opened PR: $PR_URL"
 
-      # ----------------------------
-      # Housekeeping (A: 라벨만 제거)
-      # - PR 오픈 성공 후 ai:task 라벨 제거해서 다음 스케줄에서 재처리 방지
-      # ----------------------------
       - name: Post-PR housekeeping (remove ai:task label)
         if: steps.pick.outputs.found == 'true' && inputs.dry_run != 'true'
         env:
