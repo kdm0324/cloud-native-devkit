@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo (needed for gh + git)
+      - name: Checkout repo (needed for git context)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -57,7 +57,6 @@ jobs:
           if [ "${{ github.event_name }}" = "issue_comment" ]; then
             PR_NUMBER="${{ github.event.issue.number }}"
             RAW="${{ github.event.comment.body }}"
-            # '/ai' 접두 제거 + 앞 공백 제거
             INSTRUCTION="${RAW#/ai}"
             INSTRUCTION="${INSTRUCTION#"${INSTRUCTION%%[![:space:]]*}"}"
             DRY_RUN="false"
@@ -79,47 +78,77 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }} # ✅ gh가 레포를 못찾아 .git 에러나는 것 방지
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
           PR_NUMBER="${{ steps.ctx.outputs.pr_number }}"
 
+          # ⚠️ headRepository.nameWithOwner 대신 owner.login을 사용 (빈 값 방지)
           gh pr view "$PR_NUMBER" \
-            --json number,url,headRefName,headRepository,isCrossRepository,state \
+            --json number,url,state,headRefName,isCrossRepository,headRepositoryOwner \
             > pr.json
 
           echo "PR_NUMBER=$(jq -r '.number' pr.json)" >> "$GITHUB_OUTPUT"
           echo "PR_URL=$(jq -r '.url' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "STATE=$(jq -r '.state' pr.json)" >> "$GITHUB_OUTPUT"
           echo "HEAD_REF=$(jq -r '.headRefName' pr.json)" >> "$GITHUB_OUTPUT"
           echo "IS_CROSS_REPO=$(jq -r '.isCrossRepository' pr.json)" >> "$GITHUB_OUTPUT"
-          echo "HEAD_REPO=$(jq -r '.headRepository.nameWithOwner' pr.json)" >> "$GITHUB_OUTPUT"
-          echo "STATE=$(jq -r '.state' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "HEAD_OWNER=$(jq -r '.headRepositoryOwner.login // empty' pr.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Safety gate (open PR + same repo + ai/* branch only)
+      - name: Safety gate (open PR + not fork + same owner + ai/* branch only)
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
 
           if [ "${{ steps.pr.outputs.STATE }}" != "OPEN" ]; then
-            echo "Blocked: PR is not OPEN"
+            echo "reason=Blocked: PR is not OPEN" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           if [ "${{ steps.pr.outputs.IS_CROSS_REPO }}" = "true" ]; then
-            echo "Blocked: PR from fork (isCrossRepository=true)"
+            echo "reason=Blocked: PR from fork (isCrossRepository=true)" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          if [ "${{ steps.pr.outputs.HEAD_REPO }}" != "${GITHUB_REPOSITORY}" ]; then
-            echo "Blocked: head repo mismatch (${{ steps.pr.outputs.HEAD_REPO }} != ${GITHUB_REPOSITORY})"
+          if [ -z "${{ steps.pr.outputs.HEAD_OWNER }}" ]; then
+            echo "reason=Blocked: cannot resolve head repo owner" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          if [ "${{ steps.pr.outputs.HEAD_OWNER }}" != "${{ github.repository_owner }}" ]; then
+            echo "reason=Blocked: head owner mismatch (${{ steps.pr.outputs.HEAD_OWNER }} != ${{ github.repository_owner }})" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           case "${{ steps.pr.outputs.HEAD_REF }}" in
             ai/*) echo "OK: ai branch" ;;
-            *) echo "Blocked: not an ai/* branch"; exit 1 ;;
+            *) echo "reason=Blocked: not an ai/* branch" >> "$GITHUB_OUTPUT"; exit 1 ;;
           esac
+
+      - name: Comment and stop if safety gate failed
+        if: failure() && steps.gate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ steps.pr.outputs.PR_NUMBER }}"
+
+          cat > pr_comment.txt <<EOF
+          ⛔ AI follow-up 실행이 차단되었습니다.
+          
+          - 사유: ${{ steps.gate.outputs.reason }}
+          
+          (보안상 fork PR 또는 ai/* 브랜치가 아닌 경우 실행하지 않습니다.)
+          EOF
+          gh pr comment "$PR_NUMBER" --body-file pr_comment.txt
+          exit 1
 
       - name: Checkout PR branch
         shell: bash
@@ -141,9 +170,6 @@ jobs:
           npm ci
           npm --workspace packages/core run build
 
-      # ----------------------------
-      # Agent (Gemini)
-      # ----------------------------
       - name: Agent (Gemini)
         uses: google-github-actions/run-gemini-cli@v0
         with:
@@ -191,7 +217,6 @@ jobs:
           
           Actions 로그를 확인하고, 수정 지시를 다시 `/ai ...` 로 남겨주세요.
           EOF
-
           gh pr comment "$PR_NUMBER" --body-file pr_comment.txt
           exit 1
 
@@ -221,11 +246,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           PR_NUMBER="${{ steps.pr.outputs.PR_NUMBER }}"
 
+          rm -rf .gemini || true
+
           if git diff --quiet && git diff --cached --quiet; then
-            echo "No changes to commit."
             echo "ℹ️ 변경 사항이 감지되지 않아 커밋/푸시하지 않았습니다." > pr_comment.txt
             GH_REPO="${GITHUB_REPOSITORY}" gh pr comment "$PR_NUMBER" --body-file pr_comment.txt
             exit 0
@@ -258,5 +283,4 @@ jobs:
           - npm --workspace packages/core run build
           - npm run dev:cli -- doctor
           EOF
-
           gh pr comment "$PR_NUMBER" --body-file pr_comment.txt
