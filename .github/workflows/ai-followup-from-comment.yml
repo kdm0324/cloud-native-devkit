@@ -43,8 +43,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repo (needed for gh + git)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Resolve PR number & instruction
         id: ctx
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -73,23 +79,32 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }} # ✅ gh가 레포를 못찾아 .git 에러나는 것 방지
+        shell: bash
         run: |
           set -euo pipefail
           PR_NUMBER="${{ steps.ctx.outputs.pr_number }}"
 
-          gh pr view "$PR_NUMBER" --json number,url,headRefName,headRepository,isCrossRepository > pr.json
+          gh pr view "$PR_NUMBER" \
+            --json number,url,headRefName,headRepository,isCrossRepository,state \
+            > pr.json
 
           echo "PR_NUMBER=$(jq -r '.number' pr.json)" >> "$GITHUB_OUTPUT"
           echo "PR_URL=$(jq -r '.url' pr.json)" >> "$GITHUB_OUTPUT"
           echo "HEAD_REF=$(jq -r '.headRefName' pr.json)" >> "$GITHUB_OUTPUT"
           echo "IS_CROSS_REPO=$(jq -r '.isCrossRepository' pr.json)" >> "$GITHUB_OUTPUT"
           echo "HEAD_REPO=$(jq -r '.headRepository.nameWithOwner' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "STATE=$(jq -r '.state' pr.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Safety gate (same repo + ai/* branch only)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Safety gate (open PR + same repo + ai/* branch only)
+        shell: bash
         run: |
           set -euo pipefail
+
+          if [ "${{ steps.pr.outputs.STATE }}" != "OPEN" ]; then
+            echo "Blocked: PR is not OPEN"
+            exit 1
+          fi
 
           if [ "${{ steps.pr.outputs.IS_CROSS_REPO }}" = "true" ]; then
             echo "Blocked: PR from fork (isCrossRepository=true)"
@@ -97,9 +112,7 @@ jobs:
           fi
 
           if [ "${{ steps.pr.outputs.HEAD_REPO }}" != "${GITHUB_REPOSITORY}" ]; then
-            echo "Blocked: head repo mismatch (${{
-              steps.pr.outputs.HEAD_REPO
-            }} != ${GITHUB_REPOSITORY})"
+            echo "Blocked: head repo mismatch (${{ steps.pr.outputs.HEAD_REPO }} != ${GITHUB_REPOSITORY})"
             exit 1
           fi
 
@@ -108,12 +121,8 @@ jobs:
             *) echo "Blocked: not an ai/* branch"; exit 1 ;;
           esac
 
-      - name: Checkout repo (base) + fetch PR branch
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Checkout PR branch
+        shell: bash
         run: |
           set -euo pipefail
           HEAD_REF="${{ steps.pr.outputs.HEAD_REF }}"
@@ -126,6 +135,7 @@ jobs:
           node-version: "20"
 
       - name: Install deps & build core (baseline)
+        shell: bash
         run: |
           set -euo pipefail
           npm ci
@@ -133,8 +143,6 @@ jobs:
 
       # ----------------------------
       # Agent (Gemini)
-      # - 에이전트는 파일 수정만
-      # - npm 등 검증 커맨드는 아래 Verify 단계에서 VM이 실행
       # ----------------------------
       - name: Agent (Gemini)
         uses: google-github-actions/run-gemini-cli@v0
@@ -142,7 +150,7 @@ jobs:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           args: >-
             You are an autonomous coding agent working on the repository cloud-native-devkit.
-            You are continuing work on an existing PR branch.
+            You are continuing work on an existing PR branch already checked out in this runner.
 
             USER INSTRUCTION (from PR comment or manual dispatch):
             ${{ steps.ctx.outputs.instruction }}
@@ -156,6 +164,7 @@ jobs:
             IMPLEMENT NOW by editing repository files only.
 
       - name: Verify (runbook)
+        shell: bash
         run: |
           set -euo pipefail
           npm ci
@@ -166,20 +175,28 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
         run: |
           set -euo pipefail
-          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
-            "❌ 검증 실패로 중단했습니다.
+          PR_NUMBER="${{ steps.pr.outputs.PR_NUMBER }}"
 
+          cat > pr_comment.txt <<'EOF'
+          ❌ 검증 실패로 중단했습니다.
+          
           - 실행한 커맨드:
             - npm ci
             - npm --workspace packages/core run build
             - npm run dev:cli -- doctor
+          
+          Actions 로그를 확인하고, 수정 지시를 다시 `/ai ...` 로 남겨주세요.
+          EOF
 
-          Actions 로그를 확인하고, 수정 지시를 다시 `/ai ...` 로 남겨주세요."
+          gh pr comment "$PR_NUMBER" --body-file pr_comment.txt
           exit 1
 
       - name: Remove agent artifacts (if any)
+        shell: bash
         run: |
           set -euo pipefail
           rm -rf .gemini || true
@@ -188,22 +205,29 @@ jobs:
         if: steps.ctx.outputs.dry_run == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
         run: |
           set -euo pipefail
-          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
-            "🧪 DRY_RUN=true — 수정/검증까지 완료했고, 커밋/푸시는 하지 않았습니다."
+          PR_NUMBER="${{ steps.pr.outputs.PR_NUMBER }}"
+          echo "🧪 DRY_RUN=true — 수정/검증까지 완료했고, 커밋/푸시는 하지 않았습니다." > pr_comment.txt
+          gh pr comment "$PR_NUMBER" --body-file pr_comment.txt
           exit 0
 
       - name: Commit & push (if changes exist)
+        if: steps.ctx.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
 
+          PR_NUMBER="${{ steps.pr.outputs.PR_NUMBER }}"
+
           if git diff --quiet && git diff --cached --quiet; then
             echo "No changes to commit."
-            gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
-              "ℹ️ 변경 사항이 감지되지 않아 커밋/푸시하지 않았습니다."
+            echo "ℹ️ 변경 사항이 감지되지 않아 커밋/푸시하지 않았습니다." > pr_comment.txt
+            GH_REPO="${GITHUB_REPOSITORY}" gh pr comment "$PR_NUMBER" --body-file pr_comment.txt
             exit 0
           fi
 
@@ -214,17 +238,25 @@ jobs:
           git push
 
       - name: Comment back to PR (success)
+        if: steps.ctx.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
         run: |
           set -euo pipefail
-          gh pr comment "${{ steps.pr.outputs.PR_NUMBER }}" --body \
-            "✅ /ai 지시사항을 반영해 커밋을 푸시했습니다.
+          PR_NUMBER="${{ steps.pr.outputs.PR_NUMBER }}"
 
+          cat > pr_comment.txt <<EOF
+          ✅ /ai 지시사항을 반영해 커밋을 푸시했습니다.
+          
           - 브랜치: \`${{ steps.pr.outputs.HEAD_REF }}\`
           - PR: ${{ steps.pr.outputs.PR_URL }}
-
+          
           검증:
           - npm ci
           - npm --workspace packages/core run build
-          - npm run dev:cli -- doctor"
+          - npm run dev:cli -- doctor
+          EOF
+
+          gh pr comment "$PR_NUMBER" --body-file pr_comment.txt
